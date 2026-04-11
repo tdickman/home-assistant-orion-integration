@@ -245,6 +245,32 @@ def get_insights(token: str, days: int = 7) -> Any:
     return _check(resp, "get_insights")
 
 
+# ── away mode ──────────────────────────────────────────────────────────────────
+
+
+def set_user_away(token: str, user_id: str, is_away: bool = True) -> Any:
+    """POST /v1/sleep-configurations/user-away — toggle away mode.
+
+    Body requires: user_id (string), is_away (boolean).
+    is_away=True turns the mattress off, is_away=False turns it on.
+    """
+    body: dict = {"user_id": user_id, "is_away": is_away}
+    resp = requests.post(
+        _url("/v1/sleep-configurations/user-away"),
+        json=body,
+        headers=_headers(token),
+    )
+    return _check(resp, "set_user_away")
+
+
+def get_sleep_config_temperature(token: str) -> Any:
+    """GET /v1/sleep-configurations/temperature — current temperature config."""
+    resp = requests.get(
+        _url("/v1/sleep-configurations/temperature"), headers=_headers(token)
+    )
+    return _check(resp, "get_sleep_config_temperature")
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 
@@ -266,6 +292,16 @@ def main() -> None:
         action="store_true",
         help="Force a fresh login, ignoring cached tokens",
     )
+    parser.add_argument(
+        "--set-away",
+        action="store_true",
+        help="Turn off the mattress (set user away) then show state",
+    )
+    parser.add_argument(
+        "--set-present",
+        action="store_true",
+        help="Turn on the mattress (undo away) then show state",
+    )
     args = parser.parse_args()
 
     # Obtain a valid access token (cached / refreshed / fresh login)
@@ -280,13 +316,29 @@ def main() -> None:
     if user is not None:
         _pretty("User Profile", user)
 
-    devices = list_devices(access_token)
-    if devices is not None:
-        _pretty("Devices", devices)
+    devices_data = list_devices(access_token)
+    if devices_data is not None:
+        _pretty("Devices", devices_data)
+
+    # Extract device list for away mode actions
+    device_list = []
+    if devices_data:
+        raw = devices_data
+        if isinstance(raw, dict):
+            raw = raw.get("response", raw)
+            if isinstance(raw, dict):
+                raw = raw.get("devices", [raw])
+        if isinstance(raw, list):
+            device_list = raw
 
     sleep_configs = get_sleep_config_devices(access_token)
     if sleep_configs is not None:
         _pretty("Sleep Configurations (devices)", sleep_configs)
+
+    # Try to GET the temperature config
+    temp_config = get_sleep_config_temperature(access_token)
+    if temp_config is not None:
+        _pretty("Sleep Configurations (temperature)", temp_config)
 
     session = get_session_state(access_token)
     if session is not None:
@@ -299,6 +351,37 @@ def main() -> None:
     insights = get_insights(access_token, days=args.insights_days)
     if insights is not None:
         _pretty(f"Sleep Insights (last {args.insights_days} days)", insights)
+
+    # ── Away mode actions ──────────────────────────────────────────────
+    if args.set_away or args.set_present:
+        # Get user_id from the user profile
+        user_id = ""
+        if user:
+            resp_data = user.get("response", user)
+            user_id = resp_data.get("id", "")
+
+        if not user_id:
+            print("\n[ERROR] No user_id found — cannot set away/present.")
+        else:
+            print(f"\nUsing user_id: {user_id}")
+
+            if args.set_away:
+                print("\n>>> Setting user AWAY (is_away=True, turning off)...")
+                result = set_user_away(access_token, user_id, is_away=True)
+                _pretty("set_user_away response", result)
+            elif args.set_present:
+                print("\n>>> Setting user PRESENT (is_away=False, turning on)...")
+                result = set_user_away(access_token, user_id, is_away=False)
+                _pretty("set_user_away (present) response", result)
+
+            # Re-fetch state after the change to see what differs
+            print("\n>>> Re-fetching state after change...")
+            devices2 = list_devices(access_token)
+            if devices2 is not None:
+                _pretty("Devices (after)", devices2)
+            schedules2 = get_sleep_schedules(access_token)
+            if schedules2 is not None:
+                _pretty("Sleep Schedules (after)", schedules2)
 
 
 if __name__ == "__main__":
