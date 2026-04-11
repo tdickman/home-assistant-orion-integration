@@ -7,7 +7,9 @@ info:
 
     The app is built with React Native (Expo) and uses Axios as the HTTP client.
     API calls are debounced for real-time features (e.g. temperature control).
-    A WebSocket connection is used for live zone data (configured via EXPO_PUBLIC_LIVE_WS_URL).
+    A WebSocket connection at `wss://live.api1.orionbed.com` is used for live
+    zone data (configured via EXPO_PUBLIC_LIVE_WS_URL). The WebSocket protocol
+    is documented under the `GET /ws` path and the `x-websocket` extension.
 
     **Note:** Request/response schemas were initially inferred from decompiled Hermes
     bytecode string tables. Auth endpoints (code, verify, refresh) have been verified
@@ -22,7 +24,9 @@ info:
 
 servers:
   - url: https://api1.orionbed.com
-    description: Production API
+    description: Production REST API
+  - url: wss://live.api1.orionbed.com
+    description: Production WebSocket (live device data)
 
 security:
   - bearerAuth: []
@@ -54,6 +58,10 @@ tags:
     description: User surveys
   - name: System
     description: Health checks and feature flags
+  - name: WebSocket
+    description: |
+      Real-time device data via WebSocket at wss://live.api1.orionbed.com.
+      See x-websocket section for protocol details.
 
 paths:
   # ──────────────────────────────────────────────
@@ -964,6 +972,389 @@ paths:
                   enabled:
                     type: boolean
 
+  # ──────────────────────────────────────────────
+  #  WebSocket — Live Device Data
+  # ──────────────────────────────────────────────
+  #
+  # OpenAPI 3.1 does not natively describe WebSocket protocols.
+  # The specification below is documented under x-websocket and
+  # as a placeholder GET /ws path for tooling compatibility.
+
+  /ws:
+    get:
+      operationId: connectLiveWebSocket
+      summary: Live device data (WebSocket)
+      description: |
+        **Protocol:** WebSocket (`wss://`)
+        **Server:** `wss://live.api1.orionbed.com`
+
+        Establishes a persistent WebSocket connection for real-time device
+        zone updates (temperature, device status, session state). The app
+        wraps this in a `DeviceWebSocketProvider` React context and exposes
+        it via a `useDeviceWebSocket` hook.
+
+        This is a standard WebSocket (RFC 6455) — not Phoenix Channels,
+        Socket.IO, or Ably. The native transport is React Native's
+        `WebSocketModule` backed by OkHttp.
+
+        ---
+
+        ### Connection
+
+        ```
+        wss://live.api1.orionbed.com?token=<JWT>
+        ```
+
+        The JWT access token (obtained from `POST /v1/auth/verify` or
+        `POST /v1/auth/refresh`) is passed as a `token` query parameter.
+        The server validates the token and associates the connection with
+        the authenticated user's devices.
+
+        If `EXPO_PUBLIC_LIVE_WS_URL` is not configured, the app logs
+        `[WebSocket] EXPO_PUBLIC_LIVE_WS_URL is not configured` and does
+        not attempt to connect.
+
+        ---
+
+        ### App Lifecycle
+
+        The connection is tied to the app's foreground/background state:
+
+        | App State Change | Behavior |
+        |---|---|
+        | App enters foreground | Opens WebSocket connection |
+        | App enters background | Closes connection (code `1001`) |
+        | App already in background | Skips connection/reconnection attempts |
+
+        Log messages:
+        - `[WebSocket] App state changed: <state>`
+        - `[WebSocket] Skipping connection - app is not active`
+        - `[WebSocket] Closed connection - app went to background`
+
+        ---
+
+        ### Authentication Errors & Token Refresh
+
+        When the server returns an auth error, the client:
+
+        1. Detects the error: `[WebSocket] Auth error detected, attempting token refresh...`
+        2. Calls `POST /v1/auth/refresh` to obtain a new JWT
+        3. On success: `[WebSocket] Token refresh successful, will reconnect with new token`
+        4. Reconnects with the new token as `?token=<newJWT>`
+        5. On failure: `[WebSocket] Token refresh failed, session may be expired:`
+
+        ---
+
+        ### Reconnection
+
+        On unexpected disconnection the client reconnects with backoff:
+
+        - `[WebSocket] Connection error occurred, onclose will handle reconnection`
+        - `[WebSocket] Reconnecting in <delay>`
+        - Reconnection is cancelled if the app moves to background:
+          `[WebSocket] Cancelled reconnection attempts - app went to background`
+
+        The UI reflects connection state via `connectionState`:
+        - `connectionState.connecting` — connection in progress
+        - `connectionState.connected` — connected and receiving data
+        - `connectionState.reconnecting` — reconnecting after drop
+        - `connectionState.deviceOffline` — device is not reachable
+
+        ---
+
+        ### Topic Subscription
+
+        After connecting, the client subscribes to a topic for the active device:
+
+        ```
+        live/zones/actionState
+        ```
+
+        Subscription is managed via `subscribeToTopic()`. The topic delivers
+        real-time zone action state updates for the user's device(s).
+
+        ---
+
+        ### Message Format
+
+        Messages are **JSON text** (not binary). The native `WebSocketModule`
+        delivers them as `{type: "text", data: "<json>"}` events.
+
+        On parse failure: `[WebSocket] Failed to parse message:`
+        On missing fields: `[WebSocket] Invalid message payload-missing`
+
+        ---
+
+        ### Server → Client Messages
+
+        The server pushes real-time updates for the subscribed device.
+        Message schemas are inferred from string table analysis and are
+        best-effort approximations.
+
+        #### Zone Action State Update
+
+        Pushed when zone state changes (temperature adjustment, device
+        on/off, heating/cooling status):
+
+        ```json
+        {
+          "topic": "live/zones/actionState",
+          "event": "update",
+          "data": {
+            "deviceId": "string",
+            "zones": [
+              {
+                "side": "left | right",
+                "currentTemp": 72.0,
+                "targetTemperature": 68.0,
+                "isOn": true,
+                "isAway": false,
+                "temperatureStatus": "heating | cooling | holding | off"
+              }
+            ],
+            "splitZones": true,
+            "deviceStatus": "online | offline | error | firmwareUpdate"
+          }
+        }
+        ```
+
+        #### Device Status Update
+
+        Pushed when device connectivity or status changes:
+
+        ```json
+        {
+          "topic": "live/zones/actionState",
+          "event": "deviceStatus",
+          "data": {
+            "deviceId": "string",
+            "status": "DEVICE_OFFLINE | DEVICE_ERROR | DEVICE_QUIET_MODE",
+            "firmwareUpdateInProgress": false,
+            "needsFirmwareUpdate": false,
+            "waterLevelLow": false
+          }
+        }
+        ```
+
+        #### Session State Update
+
+        Pushed when a sleep session starts or ends:
+
+        ```json
+        {
+          "topic": "live/zones/actionState",
+          "event": "sessionState",
+          "data": {
+            "active": true,
+            "sessionId": "string",
+            "startedAt": "2025-01-15T22:30:00Z"
+          }
+        }
+        ```
+
+        ---
+
+        ### Client → Server Messages
+
+        The client sends subscription management messages. Exact format
+        is inferred:
+
+        #### Subscribe
+
+        ```json
+        {
+          "action": "subscribe",
+          "topic": "live/zones/actionState",
+          "deviceId": "string"
+        }
+        ```
+
+        #### Unsubscribe
+
+        ```json
+        {
+          "action": "unsubscribe",
+          "topic": "live/zones/actionState"
+        }
+        ```
+
+        ---
+
+        ### Keepalive
+
+        The WebSocket uses standard protocol-level ping/pong frames
+        (handled by OkHttp). A `pingInterval` is configured on the
+        client. No application-level heartbeat messages were identified.
+
+        ---
+
+        ### Close Codes
+
+        | Code | Meaning |
+        |---|---|
+        | `1000` | Normal closure |
+        | `1001` | App going to background / shutdown |
+        | `1006` | Abnormal closure (no close frame) |
+
+        ---
+
+        ### Related REST Endpoints
+
+        | Endpoint | Relationship |
+        |---|---|
+        | `POST /v1/auth/verify` | Obtain initial JWT for `?token=` |
+        | `POST /v1/auth/refresh` | Refresh JWT before reconnection |
+        | `GET /v1/session-state` | HTTP fallback for session state |
+        | `PUT /v1/sleep-configurations/temperature` | HTTP-based temperature control (debounced) |
+        | `GET /v1/sleep-configurations/devices` | Initial device/zone config load |
+
+        ---
+
+        ### State Management
+
+        WebSocket data feeds into Zustand stores:
+        - `@orion_devices` — device online/offline state, status
+        - `@orion_sleep_configurations` — zone temperatures, split zone config
+
+        The `ActionState` / `actionStateReducer` processes incoming
+        WebSocket messages and dispatches `ActionEffect` side effects
+        (e.g. UI updates, debounced API calls via `_executeDebouncedApiCall`).
+
+      tags: [WebSocket]
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: true
+          description: JWT access token for authentication
+          schema:
+            type: string
+      responses:
+        "101":
+          description: |
+            Switching Protocols — WebSocket connection established.
+            Subsequent communication uses the WebSocket frame protocol.
+          headers:
+            Upgrade:
+              schema:
+                type: string
+                example: websocket
+            Connection:
+              schema:
+                type: string
+                example: Upgrade
+        "401":
+          description: Invalid or expired token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  message:
+                    type: string
+
+# ────────────────────────────────────────────────────────────────
+#  x-websocket: Machine-readable WebSocket protocol specification
+# ────────────────────────────────────────────────────────────────
+x-websocket:
+  url: wss://live.api1.orionbed.com
+  description: |
+    Live device zone data. Reverse-engineered from Hermes bytecode
+    string tables — field names and message structure are best-effort.
+  authentication:
+    type: query
+    parameter: token
+    format: JWT
+    description: |
+      The JWT access token from /v1/auth/verify is appended as ?token=<jwt>.
+      On auth errors the client refreshes via /v1/auth/refresh and reconnects.
+
+  topics:
+    live/zones/actionState:
+      description: |
+        Real-time zone action state for the authenticated user's device(s).
+        Carries temperature readings, device status, and session state.
+      subscribe:
+        description: Client subscribes after connection is established
+        message:
+          type: object
+          properties:
+            action:
+              type: string
+              const: subscribe
+            topic:
+              type: string
+              const: live/zones/actionState
+            deviceId:
+              type: string
+      unsubscribe:
+        message:
+          type: object
+          properties:
+            action:
+              type: string
+              const: unsubscribe
+            topic:
+              type: string
+              const: live/zones/actionState
+
+      serverMessages:
+        zoneActionStateUpdate:
+          description: Pushed when zone temperature or device power state changes
+          payload:
+            type: object
+            properties:
+              topic:
+                type: string
+              event:
+                type: string
+              data:
+                $ref: "#/components/schemas/WsZoneActionState"
+
+        deviceStatusUpdate:
+          description: Pushed on device connectivity or status change
+          payload:
+            type: object
+            properties:
+              topic:
+                type: string
+              event:
+                type: string
+                const: deviceStatus
+              data:
+                $ref: "#/components/schemas/WsDeviceStatus"
+
+        sessionStateUpdate:
+          description: Pushed when a sleep session starts or ends
+          payload:
+            type: object
+            properties:
+              topic:
+                type: string
+              event:
+                type: string
+                const: sessionState
+              data:
+                $ref: "#/components/schemas/WsSessionState"
+
+  connectionLifecycle:
+    connectOnForeground: true
+    disconnectOnBackground: true
+    backgroundCloseCode: 1001
+    reconnect:
+      enabled: true
+      strategy: backoff
+      tokenRefreshBeforeReconnect: true
+    pingPong: protocol-level
+
+  connectionStates:
+    - connecting
+    - connected
+    - reconnecting
+    - deviceOffline
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1310,3 +1701,142 @@ components:
               type:
                 type: string
                 enum: [text, multiple_choice, rating]
+
+    # ──────────────────────────────────────────────
+    #  WebSocket Schemas
+    # ──────────────────────────────────────────────
+
+    WsZoneActionState:
+      type: object
+      description: |
+        Real-time zone state pushed over WebSocket. Contains current
+        temperature, target temperature, and power/heating status for
+        each zone on the device. Inferred from Hermes string table —
+        field names are best-effort.
+      properties:
+        deviceId:
+          type: string
+          description: Hardware device identifier
+        zones:
+          type: array
+          description: One entry per zone (one if unified, two if split)
+          items:
+            $ref: "#/components/schemas/WsZone"
+        splitZones:
+          type: boolean
+          description: Whether the device has independent left/right zones
+        deviceStatus:
+          type: string
+          description: Current device connectivity/operational status
+          enum: [online, offline, error, firmwareUpdate]
+
+    WsZone:
+      type: object
+      description: |
+        A single temperature zone on the device. Corresponds to one
+        side of the bed when zones are split.
+      properties:
+        side:
+          type: string
+          enum: [left, right]
+          description: Bed side this zone controls
+        currentTemp:
+          type: number
+          format: float
+          description: Current measured temperature of the zone
+        targetTemperature:
+          type: number
+          format: float
+          description: Target temperature set by the user
+        isOn:
+          type: boolean
+          description: Whether this zone is actively heating/cooling
+        isAway:
+          type: boolean
+          description: Whether the user assigned to this zone is marked away
+        temperatureStatus:
+          type: string
+          description: Current heating/cooling state
+          enum: [heating, cooling, holding, off]
+
+    WsDeviceStatus:
+      type: object
+      description: |
+        Device status update pushed when connectivity or operational
+        state changes. String constants from DEVICE_* enum in the app.
+      properties:
+        deviceId:
+          type: string
+        status:
+          type: string
+          description: Device status constant
+          enum:
+            - DEVICE_OFFLINE
+            - DEVICE_ERROR
+            - DEVICE_QUIET_MODE
+            - DEVICE_DISCONNECTED
+        firmwareUpdateInProgress:
+          type: boolean
+          description: Whether a firmware update is currently being applied
+        needsFirmwareUpdate:
+          type: boolean
+          description: Whether a firmware update is available
+        waterLevelLow:
+          type: boolean
+          description: Whether the device water reservoir needs refilling
+
+    WsSessionState:
+      type: object
+      description: |
+        Sleep session state update pushed when a session starts or ends.
+        Mirrors the data from GET /v1/session-state.
+      properties:
+        active:
+          type: boolean
+          description: Whether a sleep session is currently active
+        sessionId:
+          type: string
+          description: Unique session identifier
+        startedAt:
+          type: string
+          format: date-time
+          description: When the session started (ISO 8601)
+
+    WsClientMessage:
+      type: object
+      description: |
+        Message sent from the client to the server. Used for topic
+        subscription management.
+      properties:
+        action:
+          type: string
+          enum: [subscribe, unsubscribe]
+          description: The action to perform
+        topic:
+          type: string
+          description: Topic path to subscribe/unsubscribe
+          example: live/zones/actionState
+        deviceId:
+          type: string
+          description: Device to subscribe to (required for subscribe)
+
+    WsServerMessage:
+      type: object
+      description: |
+        Envelope for all server-to-client WebSocket messages.
+      properties:
+        topic:
+          type: string
+          description: The topic this message belongs to
+          example: live/zones/actionState
+        event:
+          type: string
+          description: Event type within the topic
+          enum: [update, deviceStatus, sessionState]
+        data:
+          type: object
+          description: |
+            Event payload. Structure depends on event type:
+            - update → WsZoneActionState
+            - deviceStatus → WsDeviceStatus
+            - sessionState → WsSessionState

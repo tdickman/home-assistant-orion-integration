@@ -12,8 +12,11 @@ have to log in again.  Pass --relogin to force a fresh login.
 """
 
 import argparse
+import asyncio
 import json
 import os
+import signal
+import ssl
 import sys
 import time
 from datetime import date, timedelta
@@ -271,6 +274,139 @@ def get_sleep_config_temperature(token: str) -> Any:
     return _check(resp, "get_sleep_config_temperature")
 
 
+# ── websocket ──────────────────────────────────────────────────────────────
+
+WS_BASE_URL = "wss://live.api1.orionbed.com"
+WS_TOPIC = "live/zones/actionState"
+
+
+def _ws_ssl_context() -> ssl.SSLContext:
+    """Create an SSL context that forces HTTP/1.1 via ALPN.
+
+    Cloudflare negotiates HTTP/2 by default, which prevents the
+    WebSocket Upgrade handshake (RFC 6455 requires HTTP/1.1).
+    """
+    ctx = ssl.create_default_context()
+    ctx.set_alpn_protocols(["http/1.1"])
+    return ctx
+
+
+async def _ws_connect_and_listen(
+    token: str,
+    device_ids: list[str],
+    duration: float = 60.0,
+) -> None:
+    """Connect to the Orion live WebSocket, subscribe to devices, and log messages.
+
+    Protocol (from openapi.yaml x-websocket):
+      - URL: wss://live.api1.orionbed.com?token=<JWT>
+      - After connect, send: {"action":"subscribe","topic":"live/zones/actionState","deviceId":"<id>"}
+      - Server pushes JSON: {topic, event, data}
+    """
+    import websockets
+
+    url = f"{WS_BASE_URL}?token={token}"
+    print(f"\nConnecting to {WS_BASE_URL}?token=<JWT>...")
+    print(f"  Devices to subscribe: {device_ids}")
+    print(f"  Duration: {duration:.0f}s  (Ctrl+C to stop)\n")
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+
+    try:
+        async with websockets.connect(url, ssl=_ws_ssl_context()) as ws:
+            print("[CONNECTED] WebSocket connection established.\n")
+
+            # Subscribe to each device
+            for device_id in device_ids:
+                sub_msg = {
+                    "action": "subscribe",
+                    "topic": WS_TOPIC,
+                    "deviceId": device_id,
+                }
+                await ws.send(json.dumps(sub_msg))
+                print(f"[SUBSCRIBE] topic={WS_TOPIC}  deviceId={device_id}")
+
+            print()
+
+            # Listen for messages
+            deadline = asyncio.get_event_loop().time() + duration
+            count = 0
+            while not stop.is_set():
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    print(f"\n[DONE] Duration reached ({duration:.0f}s).")
+                    break
+                try:
+                    async with asyncio.timeout(min(remaining, 1.0)):
+                        msg = await ws.recv()
+                        count += 1
+                        ts = time.strftime("%H:%M:%S")
+                        try:
+                            data = json.loads(msg)
+                            print(f"[{ts} #{count}] {json.dumps(data, indent=2)}")
+                        except (json.JSONDecodeError, TypeError):
+                            print(f"[{ts} #{count}] {msg!r}")
+                except TimeoutError:
+                    pass
+
+            # Clean unsubscribe
+            for device_id in device_ids:
+                unsub_msg = {
+                    "action": "unsubscribe",
+                    "topic": WS_TOPIC,
+                }
+                try:
+                    await ws.send(json.dumps(unsub_msg))
+                except Exception:
+                    pass
+
+            print(f"\nTotal messages received: {count}")
+
+            # Close with 1001 (going away), matching the app's behavior
+            await ws.close(1001, "client shutdown")
+
+    except websockets.exceptions.InvalidStatus as e:
+        print(f"[ERROR] WebSocket upgrade rejected: HTTP {e.response.status_code}")
+        if e.response.status_code == 200:
+            print(
+                "\n  The server returned HTTP 200 instead of 101 Switching Protocols."
+                "\n  This means the Cloudflare proxy is not forwarding the WebSocket"
+                "\n  upgrade to the backend. The Orion mobile app (React Native /"
+                "\n  OkHttp) connects from a mobile network where Cloudflare may"
+                "\n  route the traffic differently."
+                "\n"
+                "\n  Possible causes:"
+                "\n    - Cloudflare WebSocket support is disabled for this route"
+                "\n    - The backend is not listening for WebSocket upgrades at /"
+                "\n    - A Cloudflare Worker or firewall rule blocks non-mobile clients"
+                "\n"
+                "\n  The server health check responds:"
+            )
+            if hasattr(e.response, "body") and e.response.body:
+                print(f"    {e.response.body.decode('utf-8', errors='replace')}")
+        elif e.response.status_code == 401:
+            print("  Token may be expired or invalid. Try --relogin.")
+    except Exception as e:
+        print(f"[ERROR] WebSocket failed: {type(e).__name__}: {e}")
+
+
+def run_websocket(
+    token: str,
+    device_ids: list[str],
+    duration: float = 60.0,
+) -> None:
+    """Entry point for the --websocket flag."""
+    if not device_ids:
+        print("\n[ERROR] No device IDs found — cannot subscribe to WebSocket.")
+        print("  Make sure you have at least one device on your account.")
+        return
+
+    asyncio.run(_ws_connect_and_listen(token, device_ids, duration))
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 
@@ -301,6 +437,17 @@ def main() -> None:
         "--set-present",
         action="store_true",
         help="Turn on the mattress (undo away) then show state",
+    )
+    parser.add_argument(
+        "--websocket",
+        action="store_true",
+        help="Connect to the live WebSocket and log real-time device messages",
+    )
+    parser.add_argument(
+        "--ws-duration",
+        type=float,
+        default=60.0,
+        help="How long to listen on the WebSocket in seconds (default: 60)",
     )
     args = parser.parse_args()
 
@@ -382,6 +529,12 @@ def main() -> None:
             schedules2 = get_sleep_schedules(access_token)
             if schedules2 is not None:
                 _pretty("Sleep Schedules (after)", schedules2)
+
+    # ── WebSocket ─────────────────────────────────────────────────────
+    if args.websocket:
+        # Extract device IDs from the already-fetched device list
+        ws_device_ids = [d.get("id") for d in device_list if d.get("id")]
+        run_websocket(access_token, ws_device_ids, duration=args.ws_duration)
 
 
 if __name__ == "__main__":
