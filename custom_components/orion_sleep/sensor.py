@@ -16,7 +16,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import TEMP_OFFSET_MIDPOINT
+from .const import DEFAULT_RELATIVE_TEMP_TABLE
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -83,15 +83,25 @@ def _seconds_to_ms(seconds: float | int | None) -> str | None:
     return f"{s}s"
 
 
-def _abs_to_offset(celsius: float | None) -> float | None:
-    """Convert absolute Celsius to relative offset from midpoint.
+def _celsius_to_offset(
+    celsius: float | None,
+    table: list[dict[str, float]] | None = None,
+) -> float | None:
+    """Convert absolute Celsius to app-style relative offset using lookup table.
 
-    The Orion app displays temperature as an offset from 27°C.
-    E.g. 24°C API value -> -3 in the app.
+    The Orion device provides a temperature_scale.relative[] table that maps
+    integer offsets (-10 to +10) to absolute Celsius values. The mapping is
+    NON-LINEAR (e.g. -3 = 23°C, -4 = 20.5°C, 0 = 27.5°C).
+
+    We find the table entry whose 'out' (Celsius) value is closest to the
+    given Celsius and return its 'in' (offset) value.
     """
     if celsius is None:
         return None
-    return round(celsius - TEMP_OFFSET_MIDPOINT, 1)
+    if not table:
+        table = DEFAULT_RELATIVE_TEMP_TABLE
+    best_entry = min(table, key=lambda e: abs(e["out"] - celsius))
+    return best_entry["in"]
 
 
 def _score_quality(score: float | int | None) -> str | None:
@@ -298,42 +308,31 @@ SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         icon="mdi:thermometer-alert",
         value_fn=lambda schedule: schedule.get("wakeup_temp") if schedule else None,
     ),
-    # Temperature offset sensors — app-style relative values
-    OrionSensorEntityDescription(
-        key="bedtime_temp_offset",
-        translation_key="bedtime_temp_offset",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:thermometer",
-        value_fn=lambda schedule: (
-            _abs_to_offset(schedule.get("bedtime_temp")) if schedule else None
-        ),
+)
+
+
+# Temperature offset sensor definitions — these use the device's non-linear
+# lookup table so they can't be simple lambdas in descriptions.
+OFFSET_SENSOR_DEFS: tuple[tuple[str, str, str, str], ...] = (
+    # (key, translation_key, icon, schedule_field)
+    ("bedtime_temp_offset", "bedtime_temp_offset", "mdi:thermometer", "bedtime_temp"),
+    (
+        "phase_1_temp_offset",
+        "phase_1_temp_offset",
+        "mdi:thermometer-chevron-down",
+        "phase_1_temp",
     ),
-    OrionSensorEntityDescription(
-        key="phase_1_temp_offset",
-        translation_key="phase_1_temp_offset",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:thermometer-chevron-down",
-        value_fn=lambda schedule: (
-            _abs_to_offset(schedule.get("phase_1_temp")) if schedule else None
-        ),
+    (
+        "phase_2_temp_offset",
+        "phase_2_temp_offset",
+        "mdi:thermometer-chevron-up",
+        "phase_2_temp",
     ),
-    OrionSensorEntityDescription(
-        key="phase_2_temp_offset",
-        translation_key="phase_2_temp_offset",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:thermometer-chevron-up",
-        value_fn=lambda schedule: (
-            _abs_to_offset(schedule.get("phase_2_temp")) if schedule else None
-        ),
-    ),
-    OrionSensorEntityDescription(
-        key="wakeup_temp_offset",
-        translation_key="wakeup_temp_offset",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:thermometer-alert",
-        value_fn=lambda schedule: (
-            _abs_to_offset(schedule.get("wakeup_temp")) if schedule else None
-        ),
+    (
+        "wakeup_temp_offset",
+        "wakeup_temp_offset",
+        "mdi:thermometer-alert",
+        "wakeup_temp",
     ),
 )
 
@@ -397,6 +396,13 @@ async def async_setup_entry(
             entities.append(
                 OrionScheduleSensorEntity(coordinator, device_id, description)
             )
+        for key, trans_key, icon, field in OFFSET_SENSOR_DEFS:
+            entities.append(
+                OrionScheduleOffsetSensor(
+                    coordinator, device_id, key, trans_key, icon, field
+                )
+            )
+        entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
 
     async_add_entities(entities)
@@ -486,13 +492,50 @@ class OrionScheduleSensorEntity(OrionBaseEntity, SensorEntity):
         return {k: v for k, v in attrs.items() if v is not None} or None
 
 
+class OrionScheduleOffsetSensor(OrionBaseEntity, SensorEntity):
+    """Sensor showing a schedule temperature as an app-style offset.
+
+    Uses the device's temperature_scale.relative lookup table for
+    accurate non-linear conversion from absolute Celsius to offset.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        key: str,
+        translation_key: str,
+        icon: str,
+        schedule_field: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_{key}"
+        self._attr_translation_key = translation_key
+        self._attr_icon = icon
+        self._schedule_field = schedule_field
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the schedule temperature as an offset."""
+        schedule = self.coordinator.get_today_schedule()
+        if not schedule:
+            return None
+        celsius = schedule.get(self._schedule_field)
+        return _celsius_to_offset(celsius, self._get_relative_temp_table())
+
+
 class OrionCurrentTempOffsetSensor(OrionBaseEntity, SensorEntity):
     """Sensor showing the current measured bed temperature as an app-style offset.
 
-    The Orion app displays bed temperature as a relative offset from a
-    midpoint (27°C), e.g. -3, 0, +5. This sensor shows the actual
-    measured temperature offset from the latest sleep session — the
-    value labeled "Now" in the app's temperature curve.
+    The Orion app displays bed temperature as a relative offset,
+    e.g. -3, 0, +5. This sensor shows the actual measured temperature
+    offset from the latest sleep session — the value labeled "Now" in
+    the app's temperature curve.
+
+    Uses the device's temperature_scale.relative lookup table for
+    accurate non-linear conversion.
     """
 
     _attr_translation_key = "current_temp_offset"
@@ -516,5 +559,5 @@ class OrionCurrentTempOffsetSensor(OrionBaseEntity, SensorEntity):
         temp_data = session.get("temperature", {})
         values = temp_data.get("values", [])
         if values:
-            return _abs_to_offset(values[-1])
+            return _celsius_to_offset(values[-1], self._get_relative_temp_table())
         return None

@@ -5,7 +5,7 @@ from __future__ import annotations
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DEFAULT_RELATIVE_TEMP_TABLE, DOMAIN
 from .coordinator import OrionDataUpdateCoordinator
 
 
@@ -40,3 +40,14 @@ class OrionBaseEntity(CoordinatorEntity[OrionDataUpdateCoordinator]):
             if d.get("id") == self._device_id:
                 return d
         return {}
+
+    def _get_relative_temp_table(self) -> list[dict[str, float]]:
+        """Get the device's temperature_scale.relative lookup table.
+
+        Falls back to the default table if not available.
+        """
+        device = self._get_device()
+        table = device.get("temperature_scale", {}).get("relative")
+        if table and isinstance(table, list) and len(table) > 0:
+            return table
+        return DEFAULT_RELATIVE_TEMP_TABLE

@@ -18,7 +18,30 @@ DEFAULT_SCAN_INTERVAL = 600  # 10 minutes
 CONF_INSIGHTS_DAYS = "insights_days"
 DEFAULT_INSIGHTS_DAYS = 7
 
-# The Orion app displays temperature as an offset from a midpoint of 27°C.
-# The API uses absolute Celsius (min=10, max=45).
-# Verified: app shows -3 when API returns 24°C (24 - 27 = -3).
-TEMP_OFFSET_MIDPOINT = 27.0
+# The Orion app displays temperature as a relative offset (-10 to +10).
+# The mapping between offset and absolute Celsius is NON-LINEAR and comes
+# from the device's temperature_scale.relative[] lookup table.
+# Fallback table used when the device data isn't available yet:
+DEFAULT_RELATIVE_TEMP_TABLE: list[dict[str, float]] = [
+    {"in": -10, "out": 10},
+    {"in": -9, "out": 12},
+    {"in": -8, "out": 14},
+    {"in": -7, "out": 16},
+    {"in": -6, "out": 17.5},
+    {"in": -5, "out": 19},
+    {"in": -4, "out": 20.5},
+    {"in": -3, "out": 23},
+    {"in": -2, "out": 24.5},
+    {"in": -1, "out": 26},
+    {"in": 0, "out": 27.5},
+    {"in": 1, "out": 29},
+    {"in": 2, "out": 30.5},
+    {"in": 3, "out": 32},
+    {"in": 4, "out": 33.5},
+    {"in": 5, "out": 35},
+    {"in": 6, "out": 37},
+    {"in": 7, "out": 39},
+    {"in": 8, "out": 41},
+    {"in": 9, "out": 43},
+    {"in": 10, "out": 45},
+]
