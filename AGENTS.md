@@ -15,18 +15,20 @@ home-assistant-orion-integration/
 ├── custom_components/
 │   └── orion_sleep/
 │       ├── __init__.py                # async_setup_entry / async_unload_entry
-│       ├── manifest.json              # HA integration manifest
-│       ├── const.py                   # DOMAIN, config keys, defaults
-│       ├── api.py                     # Async aiohttp API client
+│       ├── manifest.json              # HA integration manifest (v1.0.0)
+│       ├── const.py                   # DOMAIN, config keys, defaults, temp lookup table
+│       ├── api.py                     # Async aiohttp API client (308 lines)
 │       ├── coordinator.py             # DataUpdateCoordinator + data helpers
 │       ├── config_flow.py             # Three-step auth flow + options flow
-│       ├── entity.py                  # Base entity with DeviceInfo
+│       ├── entity.py                  # Base entity with DeviceInfo + temp conversion helpers
 │       ├── climate.py                 # Bed temperature control
-│       ├── sensor.py                  # Sleep insight sensors (11 sensors)
+│       ├── sensor.py                  # Sleep insight + schedule + offset sensors (17 per device)
 │       ├── binary_sensor.py           # Sleep session active
-│       ├── switch.py                  # Sleep schedule enable/disable
+│       ├── switch.py                  # Power (user-away) + sleep schedule switches
 │       ├── diagnostics.py             # Diagnostics with PII redaction
 │       ├── strings.json               # UI translations
+│       ├── translations/
+│       │   └── en.json                # English translations (mirrors strings.json)
 │       └── brand/                     # Integration icon (96px + 180px)
 ```
 
@@ -50,6 +52,8 @@ https://api1.orionbed.com
 | GET | `/v1/auth/me` | Bearer | User profile. Wrapped in `{"response": {...}, "success": true}` |
 | GET | `/v1/devices` | Bearer | Devices at `response.devices[]`. Fields: `id`, `serial_number`, `name`, `model`, `zones[]`, `temperature_range`, `temperature_scale` |
 | GET | `/v1/sleep-schedules` | Bearer | Schedules at `response.schedules.{user_id}[]` (7 days). Also `today_sleep_schedule.{user_id}` |
+| PUT | `/v1/sleep-schedules` | Bearer | Update schedule. Body: `{"schedules": [{"day": N, field: value}]}`. Partial updates work (only specified field changes). |
+| POST | `/v1/sleep-configurations/user-away` | Bearer | Toggle device power. Body: `{"user_id": "...", "is_away": bool}`. When away, zones lose user assignment. |
 | GET | `/v2/insights?from=&to=` | Bearer | NOT wrapped in `response`. Top-level: `{user_id, data: {date: {score, sessions[]}}, overview: {date: {score}}}` |
 
 ### Non-Working / Unverified Endpoints
@@ -58,7 +62,7 @@ https://api1.orionbed.com
 |------|--------|-------|
 | `/v1/sleep-configurations/devices` | **404** | Does not exist despite OpenAPI spec |
 | `/v1/sleep-configurations/temperature` | Unverified | PUT to set temp — not tested against live API |
-| `/v1/sleep-configurations/user-away` | Unverified | Removed from integration |
+| `/v1/sleep-schedules?action=enable` | Unverified | Schedule enable/disable — body format `{"enabled": bool}` not confirmed |
 | `/v1/session-state` | Returns onboarding state | `{patch_step, is_survey_complete, ...}` — NOT sleep session state |
 
 ### Real API Response Shapes
@@ -68,6 +72,7 @@ https://api1.orionbed.com
 - `zones`: `[{id: "zone_a", user: {...}}, {id: "zone_b", user: {...}}]`
 - `temperature_range`: `{min: 10, max: 45}` (Celsius)
 - `temperature_scale.fahrenheit[]`: `{in: 50..113, out: 10..45}` mapping
+- `temperature_scale.relative[]`: `{in: -10..+10, out: 10..45}` non-linear offset-to-Celsius mapping
 - `orientation`, `timezone`, `permissions`, `default_zone_id`
 
 **Schedules** — keyed by user_id, 7 entries (day 0-6):
@@ -96,30 +101,101 @@ https://api1.orionbed.com
 - Temperature values throughout the API are in **Celsius**
 - Device zones are `zone_a`/`zone_b`, not `left`/`right`
 - Sleep session detection uses `is_in_progress` from insights, not `/v1/session-state`
+- When user is "away" (device off), device zones lose their `user` field — this is how power state is detected
+- Temperature offsets (app-style -10 to +10) map **non-linearly** to absolute Celsius via `temperature_scale.relative` table
 
 ## Architecture
 
-- **Polling**: `DataUpdateCoordinator` polls `/v1/sleep-schedules` and `/v2/insights` on a configurable interval (default 600s)
-- **One-time data**: User profile and device list fetched in `_async_setup()`
+- **Polling**: `DataUpdateCoordinator` polls `/v1/devices`, `/v1/sleep-schedules`, and `/v2/insights` on a configurable interval (default 600s)
+- **One-time data**: User profile fetched once in `_async_setup()`
+- **Per-poll data**: Device list re-fetched each poll to detect away/present (power) state changes
 - **Token persistence**: Refresh callback updates `config_entry.data` so tokens survive HA restarts
-- **Error handling**: Each polled endpoint has independent try/except — one failing doesn't break the others
-- **Auth flow**: Three-step config flow (pick method -> enter email/phone -> enter verification code)
+- **Error handling**: Each polled endpoint has independent try/except — one failing doesn't break the others. Auth errors (`OrionAuthError`) always raise `ConfigEntryAuthFailed` to trigger re-auth flow.
+- **Auth flow**: Three-step config flow (pick method -> enter email/phone -> enter verification code) + re-auth support
+- **Options flow**: Configurable `scan_interval` (60-3600s) and `insights_days` (1-30 days)
+- **Temperature conversion**: `OrionBaseEntity` provides `_celsius_to_offset()` and `_offset_to_celsius()` using per-device lookup table (falls back to `DEFAULT_RELATIVE_TEMP_TABLE` in `const.py`)
+
+### Data Flow
+
+```
+Config Flow (auth) --> tokens stored in config_entry.data
+       |
+       v
+__init__.py creates OrionApiClient + OrionDataUpdateCoordinator
+       |
+       v
+coordinator._async_setup() -- fetches user profile + devices (once)
+       |
+       v
+coordinator._async_update_data() -- polls every N seconds:
+  1. ensure_valid_token() (auto-refresh, persists via callback)
+  2. list_devices()        --> coordinator.devices (away/present detection)
+  3. get_sleep_schedules() --> data["schedules"]
+  4. get_insights(days=N)  --> data["insights"]
+       |
+       v
+Entities read from coordinator:
+  - Climate: schedule (target temp, HVAC mode) + session (current temp)
+  - Sensors: insights sessions + schedule + overview scores
+  - Binary sensor: session.is_in_progress
+  - Switches: device zones (power) + schedule.bedtime_is_active
+```
 
 ## Entities
 
-| Platform | Entity | Data Source |
-|----------|--------|-------------|
-| Climate | Bed Climate | Target temp from `today_sleep_schedule.bedtime_temp`, current from latest session `temperature.values[-1]` |
-| Sensor | Sleep Score | `insights.overview.{latest_date}.score` |
-| Sensor | Total Sleep Time | `session.sleep_summary.time_asleep` |
-| Sensor | Deep/REM/Light/Awake Time | `session.sleep_summary.*` |
-| Sensor | Heart Rate Average | `session.heart_rate.average` |
-| Sensor | Breath Rate | `session.breath_rate.average` |
-| Sensor | HRV | `session.hrv.average` |
-| Sensor | Body Movement Rate | `session.movement.movement_rate` |
-| Sensor | Restless Time | `session.movement.total_seconds` |
-| Binary Sensor | Sleep Session Active | `session.is_in_progress` |
-| Switch | Sleep Schedule | `today_sleep_schedule.bedtime_is_active` |
+| Platform | Entity | Key / unique_id suffix | Data Source |
+|----------|--------|----------------------|-------------|
+| Climate | Bed Climate | `_climate` | Target temp from `today_sleep_schedule.bedtime_temp`, current from latest session `temperature.values[-1]` |
+| Sensor | Sleep Score | `_sleep_score` | `insights.overview.{latest_date}.score` with `quality_rating` extra attr |
+| Sensor | Total Sleep Time | `_total_sleep_time` | `session.sleep_summary.time_asleep` (formatted as "Xh Ym") |
+| Sensor | Deep Sleep Time | `_deep_sleep_time` | `session.sleep_summary.deep_sleep` |
+| Sensor | REM Sleep Time | `_rem_sleep_time` | `session.sleep_summary.rem_sleep` |
+| Sensor | Light Sleep Time | `_light_sleep_time` | `session.sleep_summary.light_sleep` |
+| Sensor | Awake Time | `_awake_time` | `session.sleep_summary.awake_time` |
+| Sensor | Heart Rate Average | `_heart_rate_avg` | `session.heart_rate.average` + min/max/range extra attrs |
+| Sensor | Breath Rate | `_breath_rate` | `session.breath_rate.average` + min/max/range extra attrs |
+| Sensor | HRV | `_hrv` | `session.hrv.average` + min/max extra attrs |
+| Sensor | Body Movement Rate | `_body_movement_rate` | `session.movement.movement_rate` |
+| Sensor | Restless Time | `_restless_time` | `session.movement.total_seconds` (formatted as "Xm Ys") |
+| Sensor | Bedtime | `_bedtime` | `today_sleep_schedule.bedtime` (HH:mm) |
+| Sensor | Wake-up Time | `_wakeup_time` | `today_sleep_schedule.wakeup` |
+| Sensor | Schedule Duration | `_schedule_duration` | Calculated from bedtime/wakeup (handles overnight) |
+| Sensor | Bedtime Temperature | `_bedtime_temp` | `today_sleep_schedule.bedtime_temp` + phase/smart temp extra attrs |
+| Sensor | Wake-up Temperature | `_wakeup_temp` | `today_sleep_schedule.wakeup_temp` |
+| Sensor | Current Temp Offset | `_current_temp_offset` | Latest session `temperature.values[-1]` converted to app-style offset |
+| Binary Sensor | Sleep Session Active | `_session_active` | `session.is_in_progress` (shows "Asleep" / "Not asleep") |
+| Switch | Power | `_power` | On/off via `set_user_away` API. State from zone user assignment. |
+| Switch | Sleep Schedule | `_sleep_schedule` | `today_sleep_schedule.bedtime_is_active`. Toggle via `update_sleep_schedule`. |
+
+**Per device: 1 climate + 17 sensors + 1 binary sensor + 2 switches = 21 entities**
+
+### Sensor Implementation Notes
+
+- Duration sensors (total sleep, deep sleep, etc.) deliberately avoid `device_class=DURATION` because HA would override entity names
+- Sleep score has special handling: reads from `insights.overview` (not sessions) and adds `quality_rating` extra attribute ("Excellent" >= 90, "Good" >= 80, "Fair" >= 60, "Poor" < 60)
+- Temperature offset conversion uses per-device `temperature_scale.relative` lookup table, non-linear mapping
+- Heart rate and breath rate sensors include min/max/range as extra state attributes
+
+## API Client (`api.py`)
+
+### Exception Hierarchy
+- `OrionApiError` — base for all API errors
+- `OrionAuthError(OrionApiError)` — 401 / invalid tokens
+- `OrionConnectionError(OrionApiError)` — network failures (`aiohttp.ClientError`)
+
+### Token Management
+- `_token_expired(margin_seconds=60)` — checks `time.time() + 60` against `expires_at`
+- `ensure_valid_token()` — auto-refreshes if expired
+- `_refresh_tokens()` — handles both nested (`response.session`) and flat response shapes
+- `set_token_refresh_callback(callback)` — called after successful refresh to persist tokens
+
+### Action Methods
+| Method | Endpoint | Status |
+|--------|----------|--------|
+| `set_temperature(device_id, temperature, zone_id)` | `PUT /v1/sleep-configurations/temperature` | **Unverified** |
+| `set_user_away(user_id, is_away)` | `POST /v1/sleep-configurations/user-away` | Working (used by power switch) |
+| `update_schedule_temperature(day, field, celsius)` | `PUT /v1/sleep-schedules` | Partial updates verified |
+| `update_sleep_schedule(schedule_data, action)` | `PUT /v1/sleep-schedules` | **Unverified** for enable/disable action |
 
 ## Testing
 
@@ -130,13 +206,24 @@ python orion_info.py --phone 15132015808
 ```
 Tokens cache to `~/.orion_tokens.json`. Use `--relogin` to force fresh auth.
 
+Additional `orion_info.py` flags:
+- `--insights-days N` — number of days of insights to fetch
+- `--set-away` / `--set-present` — toggle device power, then re-fetch devices/schedules to show changes
+
+## Known Issues
+
+- **Duplicate entity**: `OrionCurrentTempOffsetSensor` is appended twice per device in `sensor.py:351-352` (same `unique_id`, HA will reject or warn about the second)
+- **Unused translations**: `bed_climate_left` and `bed_climate_right` defined in strings.json but no entities use them
+
 ## Known Limitations / Future Work
 
 - `set_temperature` endpoint not verified against live API
-- Schedule enable/disable (`PUT /v1/sleep-schedules`) not verified
+- Schedule enable/disable (`PUT /v1/sleep-schedules?action=enable`) not verified
+- `async_set_hvac_mode(OFF)` and `async_turn_off()` on climate entity are no-ops (schedule-based control only)
 - No WebSocket support (WS URL/protocol not documented)
 - No firmware version exposed (not in device response)
 - HRV values frequently null in real data
 - No way to start/stop sleep sessions via API
 - Zone splitting/merging not supported
 - Guest user management not supported
+- Switch actions don't catch API errors (propagate as unhandled exceptions to HA UI)
