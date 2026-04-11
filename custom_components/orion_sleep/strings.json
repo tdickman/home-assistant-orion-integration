@@ -51,7 +51,8 @@
         "title": "Orion Sleep Options",
         "data": {
           "scan_interval": "Polling interval (seconds)",
-          "insights_days": "Days of sleep insights to fetch"
+          "insights_days": "Days of sleep insights to fetch",
+          "temperature_mode": "Temperature display mode"
         }
       }
     }
@@ -70,7 +71,11 @@
     },
     "binary_sensor": {
       "sleep_session_active": {
-        "name": "Sleep Session Active"
+        "name": "Sleep Session",
+        "state": {
+          "on": "Asleep",
+          "off": "Not asleep"
+        }
       }
     },
     "switch": {
@@ -86,19 +91,19 @@
         "name": "Total Sleep Time"
       },
       "deep_sleep_time": {
-        "name": "Deep Sleep Time"
+        "name": "Deep Sleep"
       },
       "rem_sleep_time": {
-        "name": "REM Sleep Time"
+        "name": "REM Sleep"
       },
       "light_sleep_time": {
-        "name": "Light Sleep Time"
+        "name": "Light Sleep"
       },
       "awake_time": {
         "name": "Awake Time"
       },
       "heart_rate_avg": {
-        "name": "Heart Rate Average"
+        "name": "Heart Rate"
       },
       "breath_rate": {
         "name": "Breath Rate"
@@ -111,6 +116,21 @@
       },
       "restless_time": {
         "name": "Restless Time"
+      },
+      "bedtime": {
+        "name": "Bedtime"
+      },
+      "wakeup_time": {
+        "name": "Wake Up Time"
+      },
+      "schedule_duration": {
+        "name": "Schedule Duration"
+      },
+      "bedtime_temp": {
+        "name": "Bedtime Temperature"
+      },
+      "wakeup_temp": {
+        "name": "Wake Up Temperature"
       }
     }
   }

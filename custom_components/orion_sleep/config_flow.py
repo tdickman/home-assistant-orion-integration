@@ -25,9 +25,13 @@ from .const import (
     CONF_INSIGHTS_DAYS,
     CONF_REFRESH_TOKEN,
     CONF_SCAN_INTERVAL,
+    CONF_TEMP_MODE,
     DEFAULT_INSIGHTS_DAYS,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_TEMP_MODE,
     DOMAIN,
+    TEMP_MODE_ABSOLUTE,
+    TEMP_MODE_OFFSET,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -270,6 +274,9 @@ class OrionSleepOptionsFlow(OptionsFlow):
         current_insights_days = self._config_entry.options.get(
             CONF_INSIGHTS_DAYS, DEFAULT_INSIGHTS_DAYS
         )
+        current_temp_mode = self._config_entry.options.get(
+            CONF_TEMP_MODE, DEFAULT_TEMP_MODE
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -281,6 +288,12 @@ class OrionSleepOptionsFlow(OptionsFlow):
                     vol.Required(
                         CONF_INSIGHTS_DAYS, default=current_insights_days
                     ): vol.All(vol.Coerce(int), vol.Range(min=1, max=30)),
+                    vol.Required(CONF_TEMP_MODE, default=current_temp_mode): vol.In(
+                        {
+                            TEMP_MODE_OFFSET: "Relative offset (like the app: -10 to +10)",
+                            TEMP_MODE_ABSOLUTE: "Absolute Celsius (10°C to 45°C)",
+                        }
+                    ),
                 }
             ),
         )

@@ -14,7 +14,6 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -24,11 +23,7 @@ from .entity import OrionBaseEntity
 _LOGGER = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, kw_only=True)
-class OrionSensorEntityDescription(SensorEntityDescription):
-    """Describe an Orion Sleep sensor."""
-
-    value_fn: Callable[[dict | None], Any]
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 
 def _get_sleep_summary(session: dict | None) -> dict:
@@ -66,6 +61,41 @@ def _get_movement(session: dict | None) -> dict:
     return session.get("movement", {})
 
 
+def _minutes_to_hm(minutes: float | int | None) -> str | None:
+    """Convert minutes to 'Xh Ym' string like the app shows."""
+    if minutes is None:
+        return None
+    total = int(round(minutes))
+    h, m = divmod(total, 60)
+    if h > 0:
+        return f"{h}h {m}m"
+    return f"{m}m"
+
+
+def _seconds_to_ms(seconds: float | int | None) -> str | None:
+    """Convert seconds to 'Xm Ys' string like the app shows."""
+    if seconds is None:
+        return None
+    total = int(round(seconds))
+    m, s = divmod(total, 60)
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _score_quality(score: float | int | None) -> str | None:
+    """Return a quality label for a sleep score, matching the app's rating."""
+    if score is None:
+        return None
+    if score >= 90:
+        return "Excellent"
+    if score >= 80:
+        return "Good"
+    if score >= 60:
+        return "Fair"
+    return "Poor"
+
+
 def _get_score(coordinator_data: dict) -> float | None:
     """Get the most recent sleep score from insights overview."""
     insights = coordinator_data.get("insights", {})
@@ -85,91 +115,219 @@ def _get_score(coordinator_data: dict) -> float | None:
     return None
 
 
-SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
+# ── Sensor descriptions ───────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, kw_only=True)
+class OrionSensorEntityDescription(SensorEntityDescription):
+    """Describe an Orion Sleep sensor."""
+
+    value_fn: Callable[[dict | None], Any]
+    extra_attrs_fn: Callable[[dict | None], dict[str, Any]] | None = None
+    icon: str | None = None
+
+
+# Duration sensors: we intentionally do NOT set device_class=DURATION.
+# HA's DURATION device class overrides entity names on device pages with a
+# generic "Duration" label, making all sleep duration sensors indistinguishable.
+# Instead we format the values ourselves as human-friendly strings (7h 53m).
+
+INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="sleep_score",
         translation_key="sleep_score",
         native_unit_of_measurement="points",
         state_class=SensorStateClass.MEASUREMENT,
-        # Sleep score comes from the insights overview, not a session
+        icon="mdi:medal-outline",
         value_fn=lambda session: None,  # handled specially in the entity
+        extra_attrs_fn=lambda session: {},  # handled specially in the entity
     ),
     OrionSensorEntityDescription(
         key="total_sleep_time",
         translation_key="total_sleep_time",
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda session: _get_sleep_summary(session).get("time_asleep"),
+        icon="mdi:sleep",
+        value_fn=lambda session: _minutes_to_hm(
+            _get_sleep_summary(session).get("time_asleep")
+        ),
     ),
     OrionSensorEntityDescription(
         key="deep_sleep_time",
         translation_key="deep_sleep_time",
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda session: _get_sleep_summary(session).get("deep_sleep"),
+        icon="mdi:power-sleep",
+        value_fn=lambda session: _minutes_to_hm(
+            _get_sleep_summary(session).get("deep_sleep")
+        ),
     ),
     OrionSensorEntityDescription(
         key="rem_sleep_time",
         translation_key="rem_sleep_time",
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda session: _get_sleep_summary(session).get("rem_sleep"),
+        icon="mdi:eye-refresh-outline",
+        value_fn=lambda session: _minutes_to_hm(
+            _get_sleep_summary(session).get("rem_sleep")
+        ),
     ),
     OrionSensorEntityDescription(
         key="light_sleep_time",
         translation_key="light_sleep_time",
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda session: _get_sleep_summary(session).get("light_sleep"),
+        icon="mdi:weather-night",
+        value_fn=lambda session: _minutes_to_hm(
+            _get_sleep_summary(session).get("light_sleep")
+        ),
     ),
     OrionSensorEntityDescription(
         key="awake_time",
         translation_key="awake_time",
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda session: _get_sleep_summary(session).get("awake_time"),
+        icon="mdi:eye-outline",
+        value_fn=lambda session: _minutes_to_hm(
+            _get_sleep_summary(session).get("awake_time")
+        ),
     ),
     OrionSensorEntityDescription(
         key="heart_rate_avg",
         translation_key="heart_rate_avg",
         native_unit_of_measurement="bpm",
         state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:heart-pulse",
         value_fn=lambda session: _get_heart_rate(session).get("average"),
+        extra_attrs_fn=lambda session: {
+            "min": _get_heart_rate(session).get("min"),
+            "max": _get_heart_rate(session).get("max"),
+            "range": (
+                f"{_get_heart_rate(session).get('min')} - {_get_heart_rate(session).get('max')}"
+                if _get_heart_rate(session).get("min") is not None
+                and _get_heart_rate(session).get("max") is not None
+                else None
+            ),
+        },
     ),
     OrionSensorEntityDescription(
         key="breath_rate",
         translation_key="breath_rate",
         native_unit_of_measurement="breaths/min",
         state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:lungs",
         value_fn=lambda session: _get_breath_rate(session).get("average"),
+        extra_attrs_fn=lambda session: {
+            "min": _get_breath_rate(session).get("min"),
+            "max": _get_breath_rate(session).get("max"),
+            "range": (
+                f"{_get_breath_rate(session).get('min')} - {_get_breath_rate(session).get('max')}"
+                if _get_breath_rate(session).get("min") is not None
+                and _get_breath_rate(session).get("max") is not None
+                else None
+            ),
+        },
     ),
     OrionSensorEntityDescription(
         key="hrv",
         translation_key="hrv",
         native_unit_of_measurement="ms",
         state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:heart-flash",
         value_fn=lambda session: _get_hrv(session).get("average"),
+        extra_attrs_fn=lambda session: {
+            "min": _get_hrv(session).get("min"),
+            "max": _get_hrv(session).get("max"),
+        },
     ),
     OrionSensorEntityDescription(
         key="body_movement_rate",
         translation_key="body_movement_rate",
+        native_unit_of_measurement="/hr",
         state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:run",
         value_fn=lambda session: _get_movement(session).get("movement_rate"),
     ),
     OrionSensorEntityDescription(
         key="restless_time",
         translation_key="restless_time",
-        native_unit_of_measurement=UnitOfTime.SECONDS,
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda session: _get_movement(session).get("total_seconds"),
+        icon="mdi:motion-sensor",
+        # Format as human-friendly string like the app (3m 36s)
+        value_fn=lambda session: _seconds_to_ms(
+            _get_movement(session).get("total_seconds")
+        ),
     ),
 )
+
+# Schedule sensors — derived from today_sleep_schedule, not sessions
+
+SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
+    OrionSensorEntityDescription(
+        key="bedtime",
+        translation_key="bedtime",
+        icon="mdi:bed-clock",
+        value_fn=lambda schedule: schedule.get("bedtime") if schedule else None,
+    ),
+    OrionSensorEntityDescription(
+        key="wakeup_time",
+        translation_key="wakeup_time",
+        icon="mdi:alarm",
+        value_fn=lambda schedule: schedule.get("wakeup") if schedule else None,
+    ),
+    OrionSensorEntityDescription(
+        key="schedule_duration",
+        translation_key="schedule_duration",
+        icon="mdi:timer-sand",
+        value_fn=lambda schedule: _calc_schedule_duration(schedule),
+    ),
+    OrionSensorEntityDescription(
+        key="bedtime_temp",
+        translation_key="bedtime_temp",
+        native_unit_of_measurement="°C",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:thermometer-lines",
+        value_fn=lambda schedule: schedule.get("bedtime_temp") if schedule else None,
+        extra_attrs_fn=lambda schedule: _schedule_temp_attrs(schedule),
+    ),
+    OrionSensorEntityDescription(
+        key="wakeup_temp",
+        translation_key="wakeup_temp",
+        native_unit_of_measurement="°C",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:thermometer-alert",
+        value_fn=lambda schedule: schedule.get("wakeup_temp") if schedule else None,
+    ),
+)
+
+
+def _calc_schedule_duration(schedule: dict | None) -> str | None:
+    """Calculate the duration between bedtime and wakeup as 'Xh Ym'."""
+    if not schedule:
+        return None
+    bedtime = schedule.get("bedtime")
+    wakeup = schedule.get("wakeup")
+    if not bedtime or not wakeup:
+        return None
+    try:
+        bh, bm = map(int, bedtime.split(":"))
+        wh, wm = map(int, wakeup.split(":"))
+        bed_mins = bh * 60 + bm
+        wake_mins = wh * 60 + wm
+        if wake_mins <= bed_mins:
+            # Wakeup is next day
+            wake_mins += 24 * 60
+        total = wake_mins - bed_mins
+        h, m = divmod(total, 60)
+        return f"{h}h {m}m"
+    except (ValueError, AttributeError):
+        return None
+
+
+def _schedule_temp_attrs(schedule: dict | None) -> dict[str, Any]:
+    """Extra attributes for the bedtime temp sensor showing the full temp curve."""
+    if not schedule:
+        return {}
+    attrs: dict[str, Any] = {}
+    for key in ("phase_1_temp", "phase_2_temp", "wakeup_temp"):
+        val = schedule.get(key)
+        if val is not None:
+            attrs[key] = val
+    if schedule.get("is_smart_temperature_active") is not None:
+        attrs["smart_temperature"] = schedule["is_smart_temperature_active"]
+    return attrs
+
+
+# ── Setup ─────────────────────────────────────────────────────────────────
 
 
 async def async_setup_entry(
@@ -179,16 +337,23 @@ async def async_setup_entry(
 ) -> None:
     """Set up Orion Sleep sensor entities."""
     coordinator: OrionDataUpdateCoordinator = entry.runtime_data
-    entities: list[OrionSensorEntity] = []
+    entities: list[OrionSensorEntity | OrionScheduleSensorEntity] = []
 
     for device in coordinator.devices:
         device_id = device.get("id")
         if not device_id:
             continue
-        for description in SENSOR_DESCRIPTIONS:
+        for description in INSIGHT_SENSOR_DESCRIPTIONS:
             entities.append(OrionSensorEntity(coordinator, device_id, description))
+        for description in SCHEDULE_SENSOR_DESCRIPTIONS:
+            entities.append(
+                OrionScheduleSensorEntity(coordinator, device_id, description)
+            )
 
     async_add_entities(entities)
+
+
+# ── Entities ──────────────────────────────────────────────────────────────
 
 
 class OrionSensorEntity(OrionBaseEntity, SensorEntity):
@@ -218,3 +383,55 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
 
         session = self.coordinator.get_latest_session()
         return self.entity_description.value_fn(session)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return extra state attributes."""
+        if not self.coordinator.data:
+            return None
+
+        # Sleep score gets the quality rating
+        if self.entity_description.key == "sleep_score":
+            score = _get_score(self.coordinator.data)
+            quality = _score_quality(score)
+            if quality:
+                return {"quality_rating": quality}
+            return None
+
+        if self.entity_description.extra_attrs_fn is None:
+            return None
+        session = self.coordinator.get_latest_session()
+        attrs = self.entity_description.extra_attrs_fn(session)
+        # Filter out None values
+        return {k: v for k, v in attrs.items() if v is not None} or None
+
+
+class OrionScheduleSensorEntity(OrionBaseEntity, SensorEntity):
+    """Sensor entity for Orion Sleep schedule data."""
+
+    entity_description: OrionSensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        description: OrionSensorEntityDescription,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self.entity_description = description
+        self._attr_unique_id = f"{device_id}_{description.key}"
+
+    @property
+    def native_value(self) -> Any:
+        """Return the sensor value from today's schedule."""
+        schedule = self.coordinator.get_today_schedule()
+        return self.entity_description.value_fn(schedule)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return extra state attributes."""
+        if self.entity_description.extra_attrs_fn is None:
+            return None
+        schedule = self.coordinator.get_today_schedule()
+        attrs = self.entity_description.extra_attrs_fn(schedule)
+        return {k: v for k, v in attrs.items() if v is not None} or None

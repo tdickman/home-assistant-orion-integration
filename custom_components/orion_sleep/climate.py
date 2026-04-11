@@ -15,10 +15,28 @@ from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import (
+    CONF_TEMP_MODE,
+    DEFAULT_TEMP_MODE,
+    TEMP_MODE_OFFSET,
+    TEMP_OFFSET_MIDPOINT,
+)
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _abs_to_offset(celsius: float | None) -> float | None:
+    """Convert absolute Celsius to relative offset from midpoint."""
+    if celsius is None:
+        return None
+    return round(celsius - TEMP_OFFSET_MIDPOINT, 1)
+
+
+def _offset_to_abs(offset: float) -> float:
+    """Convert relative offset to absolute Celsius."""
+    return round(offset + TEMP_OFFSET_MIDPOINT, 1)
 
 
 async def async_setup_entry(
@@ -48,8 +66,17 @@ class OrionClimateEntity(OrionBaseEntity, ClimateEntity):
     """Climate entity for an Orion Sleep bed.
 
     Temperature data comes from the sleep schedule (bedtime_temp, wakeup_temp)
-    and the latest insights session temperature readings. The API uses Celsius
-    internally (temperature_range min=10, max=45).
+    and the latest insights session temperature readings.
+
+    Supports two display modes (configurable in options):
+    - Offset mode (default): Shows relative offset like the Orion app (-10 to +10).
+      The offset is relative to a midpoint of 27.5°C. This matches the app's UI
+      where users see values like "-3", "0", "+5".
+    - Absolute mode: Shows raw Celsius values (10°C to 45°C) as received from
+      the API. Useful for users who want exact temperatures.
+
+    Internally, the API always uses absolute Celsius. Conversion happens at the
+    presentation layer only.
     """
 
     _attr_hvac_modes = [HVACMode.HEAT_COOL, HVACMode.OFF]
@@ -58,7 +85,6 @@ class OrionClimateEntity(OrionBaseEntity, ClimateEntity):
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
     )
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _enable_turn_on_off_backwards_compat = False
     _attr_translation_key = "bed_climate"
 
@@ -72,11 +98,48 @@ class OrionClimateEntity(OrionBaseEntity, ClimateEntity):
         self._device = device
         self._attr_unique_id = f"{device_id}_climate"
 
-        # Temperature range from device data (Celsius)
-        temp_range = device.get("temperature_range", {})
-        self._attr_min_temp = float(temp_range.get("min", 10))
-        self._attr_max_temp = float(temp_range.get("max", 45))
-        self._attr_target_temperature_step = 0.5
+    @property
+    def _use_offset_mode(self) -> bool:
+        """Return True if the user chose offset (app-style) temperature display."""
+        mode = self.coordinator.config_entry.options.get(
+            CONF_TEMP_MODE, DEFAULT_TEMP_MODE
+        )
+        return mode == TEMP_MODE_OFFSET
+
+    @property
+    def temperature_unit(self) -> str:
+        """Return the temperature unit.
+
+        In offset mode we return CELSIUS but the values are offsets.
+        HA doesn't have a native "offset" unit, so we use CELSIUS and
+        adjust the display range and step accordingly.
+        """
+        return UnitOfTemperature.CELSIUS
+
+    @property
+    def min_temp(self) -> float:
+        """Return minimum temperature."""
+        temp_range = self._device.get("temperature_range", {})
+        abs_min = float(temp_range.get("min", 10))
+        if self._use_offset_mode:
+            return _abs_to_offset(abs_min) or -17.5
+        return abs_min
+
+    @property
+    def max_temp(self) -> float:
+        """Return maximum temperature."""
+        temp_range = self._device.get("temperature_range", {})
+        abs_max = float(temp_range.get("max", 45))
+        if self._use_offset_mode:
+            return _abs_to_offset(abs_max) or 17.5
+        return abs_max
+
+    @property
+    def target_temperature_step(self) -> float:
+        """Return the step for temperature adjustments."""
+        if self._use_offset_mode:
+            return 1.0
+        return 0.5
 
     @property
     def current_temperature(self) -> float | None:
@@ -87,8 +150,10 @@ class OrionClimateEntity(OrionBaseEntity, ClimateEntity):
         temp_data = session.get("temperature", {})
         values = temp_data.get("values", [])
         if values:
-            # Return the most recent temperature reading
-            return values[-1]
+            abs_temp = values[-1]
+            if self._use_offset_mode:
+                return _abs_to_offset(abs_temp)
+            return abs_temp
         return None
 
     @property
@@ -97,8 +162,12 @@ class OrionClimateEntity(OrionBaseEntity, ClimateEntity):
         schedule = self.coordinator.get_today_schedule()
         if not schedule:
             return None
-        # Use bedtime_temp as the target
-        return schedule.get("bedtime_temp")
+        abs_temp = schedule.get("bedtime_temp")
+        if abs_temp is None:
+            return None
+        if self._use_offset_mode:
+            return _abs_to_offset(abs_temp)
+        return abs_temp
 
     @property
     def hvac_mode(self) -> HVACMode:
@@ -108,11 +177,44 @@ class OrionClimateEntity(OrionBaseEntity, ClimateEntity):
             return HVACMode.HEAT_COOL
         return HVACMode.OFF
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra attributes showing the temperature mode and schedule temps."""
+        attrs: dict[str, Any] = {
+            "temperature_mode": "offset" if self._use_offset_mode else "absolute",
+        }
+        schedule = self.coordinator.get_today_schedule()
+        if schedule:
+            if self._use_offset_mode:
+                for key in (
+                    "bedtime_temp",
+                    "wakeup_temp",
+                    "phase_1_temp",
+                    "phase_2_temp",
+                ):
+                    val = schedule.get(key)
+                    if val is not None:
+                        attrs[key] = _abs_to_offset(val)
+            else:
+                for key in (
+                    "bedtime_temp",
+                    "wakeup_temp",
+                    "phase_1_temp",
+                    "phase_2_temp",
+                ):
+                    val = schedule.get(key)
+                    if val is not None:
+                        attrs[key] = val
+        return attrs
+
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set target temperature."""
         temp = kwargs.get(ATTR_TEMPERATURE)
         if temp is None:
             return
+        # Convert back to absolute Celsius for the API
+        if self._use_offset_mode:
+            temp = _offset_to_abs(temp)
         await self.coordinator.api_client.set_temperature(
             device_id=self._device_id,
             temperature=temp,
@@ -130,6 +232,9 @@ class OrionClimateEntity(OrionBaseEntity, ClimateEntity):
         """Turn on the climate entity."""
         target = self.target_temperature
         if target is not None:
+            # Convert back to absolute if in offset mode
+            if self._use_offset_mode:
+                target = _offset_to_abs(target)
             await self.coordinator.api_client.set_temperature(
                 device_id=self._device_id,
                 temperature=target,

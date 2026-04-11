@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.binary_sensor import (
-    BinarySensorDeviceClass,
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -41,10 +40,15 @@ class OrionSessionActiveBinarySensor(OrionBaseEntity, BinarySensorEntity):
 
     Determined by checking if the latest session in insights has
     is_in_progress == True.
+
+    We intentionally do NOT set a device_class here. Using
+    BinarySensorDeviceClass.RUNNING shows "Running / Not running" which
+    is confusing for sleep tracking. Instead we rely on translation_key
+    to provide "Asleep / Not asleep" state labels.
     """
 
-    _attr_device_class = BinarySensorDeviceClass.RUNNING
     _attr_translation_key = "sleep_session_active"
+    _attr_icon = "mdi:bed"
 
     def __init__(
         self,
