@@ -72,6 +72,15 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             "insights": {},
         }
 
+        # Re-fetch devices to detect away/present state changes.
+        # When a user is "away" (device off), zones lose their user field.
+        try:
+            self.devices = await self.api_client.list_devices()
+        except OrionAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except (OrionApiError, OrionConnectionError) as err:
+            _LOGGER.warning("Failed to refresh device list: %s", err)
+
         try:
             data["schedules"] = await self.api_client.get_sleep_schedules()
         except OrionAuthError as err:
@@ -124,3 +133,23 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             if sched.get("bedtime_is_active"):
                 return True
         return False
+
+    def is_device_on(self, device_id: str) -> bool | None:
+        """Check if the device is on (user present, not away).
+
+        When the user is "away" (device off), the device's zones lose
+        their user assignment. When present (on), zones have a user dict.
+        """
+        for device in self.devices:
+            if device.get("id") != device_id:
+                continue
+            zones = device.get("zones", [])
+            if not zones:
+                return None
+            # Check if any zone has this user assigned
+            for zone in zones:
+                zone_user = zone.get("user")
+                if zone_user and zone_user.get("id") == self.user_id:
+                    return True
+            return False
+        return None

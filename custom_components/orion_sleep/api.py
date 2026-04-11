@@ -258,6 +258,22 @@ class OrionApiClient:
             "PUT", "/v1/sleep-configurations/temperature", json_data=body
         )
 
+    async def set_user_away(self, user_id: str, is_away: bool) -> dict:
+        """POST /v1/sleep-configurations/user-away — toggle device power.
+
+        is_away=True turns the mattress off (user marked as away).
+        is_away=False turns the mattress on (user marked as present).
+
+        The response returns the updated device list. When away, zones
+        lose their user assignment; when present, users are re-assigned.
+        """
+        await self.ensure_valid_token()
+        return await self._request(
+            "POST",
+            "/v1/sleep-configurations/user-away",
+            json_data={"user_id": user_id, "is_away": is_away},
+        )
+
     async def update_sleep_schedule(
         self, schedule_data: dict, action: str | None = None
     ) -> dict:

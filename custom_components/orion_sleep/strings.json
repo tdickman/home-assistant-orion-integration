@@ -78,6 +78,9 @@
       }
     },
     "switch": {
+      "power": {
+        "name": "Power"
+      },
       "sleep_schedule": {
         "name": "Sleep Schedule"
       }
