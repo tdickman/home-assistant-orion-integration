@@ -1,0 +1,139 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Orion Sleep Login",
+        "description": "Choose how you log in to your Orion Sleep account.",
+        "data": {
+          "auth_method": "Login method"
+        }
+      },
+      "email": {
+        "title": "Orion Sleep Login",
+        "description": "Enter your Orion Sleep account email. A verification code will be sent to you.",
+        "data": {
+          "email": "Email address"
+        }
+      },
+      "phone": {
+        "title": "Orion Sleep Login",
+        "description": "Enter your Orion Sleep account phone number. A verification code will be sent to you.",
+        "data": {
+          "phone": "Phone number"
+        }
+      },
+      "verify": {
+        "title": "Enter Verification Code",
+        "description": "A verification code has been sent. Please enter it below.",
+        "data": {
+          "code": "Verification code"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Orion Sleep",
+        "description": "Your Orion Sleep session has expired. Press submit to receive a new verification code."
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Orion Sleep API",
+      "invalid_code": "Invalid verification code",
+      "invalid_auth": "Authentication failed",
+      "unknown": "An unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "This account is already configured",
+      "reauth_successful": "Re-authentication successful"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Orion Sleep Options",
+        "data": {
+          "scan_interval": "Polling interval (seconds)",
+          "insights_days": "Days of sleep insights to fetch"
+        }
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "bed_climate": {
+        "name": "Bed Climate"
+      },
+      "bed_climate_left": {
+        "name": "Bed Climate Left"
+      },
+      "bed_climate_right": {
+        "name": "Bed Climate Right"
+      }
+    },
+    "binary_sensor": {
+      "sleep_session_active": {
+        "name": "Sleep Session",
+        "state": {
+          "on": "Asleep",
+          "off": "Not asleep"
+        }
+      }
+    },
+    "switch": {
+      "sleep_schedule": {
+        "name": "Sleep Schedule"
+      }
+    },
+    "sensor": {
+      "sleep_score": {
+        "name": "Sleep Score"
+      },
+      "total_sleep_time": {
+        "name": "Total Sleep Time"
+      },
+      "deep_sleep_time": {
+        "name": "Deep Sleep"
+      },
+      "rem_sleep_time": {
+        "name": "REM Sleep"
+      },
+      "light_sleep_time": {
+        "name": "Light Sleep"
+      },
+      "awake_time": {
+        "name": "Awake Time"
+      },
+      "heart_rate_avg": {
+        "name": "Heart Rate"
+      },
+      "breath_rate": {
+        "name": "Breath Rate"
+      },
+      "hrv": {
+        "name": "HRV"
+      },
+      "body_movement_rate": {
+        "name": "Body Movement Rate"
+      },
+      "restless_time": {
+        "name": "Restless Time"
+      },
+      "bedtime": {
+        "name": "Bedtime"
+      },
+      "wakeup_time": {
+        "name": "Wake Up Time"
+      },
+      "schedule_duration": {
+        "name": "Schedule Duration"
+      },
+      "bedtime_temp": {
+        "name": "Bedtime Temperature"
+      },
+      "wakeup_temp": {
+        "name": "Wake Up Temperature"
+      },
+      "temperature_offset": {
+        "name": "Temperature Offset"
+      }
+    }
+  }
+}
