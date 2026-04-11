@@ -1,0 +1,104 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Orion Sleep Login",
+        "description": "Enter your Orion Sleep account credentials. A verification code will be sent to you.",
+        "data": {
+          "auth_method": "Login method",
+          "auth_value": "Email address or phone number"
+        }
+      },
+      "verify": {
+        "title": "Enter Verification Code",
+        "description": "A verification code has been sent. Please enter it below.",
+        "data": {
+          "code": "Verification code"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Orion Sleep",
+        "description": "Your Orion Sleep session has expired. Press submit to receive a new verification code."
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Orion Sleep API",
+      "invalid_code": "Invalid verification code",
+      "invalid_auth": "Authentication failed",
+      "unknown": "An unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "This account is already configured",
+      "reauth_successful": "Re-authentication successful"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Orion Sleep Options",
+        "data": {
+          "scan_interval": "Polling interval (seconds)",
+          "insights_days": "Days of sleep insights to fetch"
+        }
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "bed_climate": {
+        "name": "Bed Climate"
+      },
+      "bed_climate_left": {
+        "name": "Bed Climate Left"
+      },
+      "bed_climate_right": {
+        "name": "Bed Climate Right"
+      }
+    },
+    "binary_sensor": {
+      "sleep_session_active": {
+        "name": "Sleep Session Active"
+      }
+    },
+    "switch": {
+      "sleep_schedule": {
+        "name": "Sleep Schedule"
+      }
+    },
+    "sensor": {
+      "sleep_score": {
+        "name": "Sleep Score"
+      },
+      "hrv": {
+        "name": "HRV"
+      },
+      "breath_rate": {
+        "name": "Breath Rate"
+      },
+      "body_movement_rate": {
+        "name": "Body Movement Rate"
+      },
+      "restless_time": {
+        "name": "Restless Time"
+      },
+      "times_left_bed": {
+        "name": "Times Left Bed"
+      },
+      "total_sleep_time": {
+        "name": "Total Sleep Time"
+      },
+      "awake_time": {
+        "name": "Awake Time"
+      },
+      "light_sleep_time": {
+        "name": "Light Sleep Time"
+      },
+      "deep_sleep_time": {
+        "name": "Deep Sleep Time"
+      },
+      "rem_sleep_time": {
+        "name": "REM Sleep Time"
+      }
+    }
+  }
+}

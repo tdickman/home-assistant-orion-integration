@@ -1,0 +1,13 @@
+{
+  "domain": "orion_sleep",
+  "name": "Orion Sleep",
+  "version": "1.0.0",
+  "documentation": "https://github.com/tdickman/home-assistant-orion-integration",
+  "issue_tracker": "https://github.com/tdickman/home-assistant-orion-integration/issues",
+  "codeowners": ["@tdickman"],
+  "config_flow": true,
+  "dependencies": [],
+  "requirements": [],
+  "integration_type": "hub",
+  "iot_class": "cloud_polling"
+}
