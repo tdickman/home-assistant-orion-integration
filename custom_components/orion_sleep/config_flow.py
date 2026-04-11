@@ -56,37 +56,12 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 1: User enters auth method and value, we send the code."""
-        errors: dict[str, str] = {}
-
+        """Step 1: User picks login method (email or phone)."""
         if user_input is not None:
             self._auth_method = user_input[CONF_AUTH_METHOD]
-            self._auth_value = user_input[CONF_AUTH_VALUE].strip()
-
-            # Set unique ID to prevent duplicate entries
-            unique_id = self._auth_value.lower()
-            await self.async_set_unique_id(unique_id)
-            self._abort_if_unique_id_configured()
-
-            # Send verification code
-            session = async_get_clientsession(self.hass)
-            client = OrionApiClient(session=session)
-
-            try:
-                email = (
-                    self._auth_value if self._auth_method == AUTH_METHOD_EMAIL else None
-                )
-                phone = (
-                    self._auth_value if self._auth_method == AUTH_METHOD_PHONE else None
-                )
-                success = await client.request_auth_code(email=email, phone=phone)
-                if success:
-                    return await self.async_step_verify()
-                errors["base"] = "cannot_connect"
-            except OrionConnectionError:
-                errors["base"] = "cannot_connect"
-            except OrionApiError:
-                errors["base"] = "unknown"
+            if self._auth_method == AUTH_METHOD_EMAIL:
+                return await self.async_step_email()
+            return await self.async_step_phone()
 
         return self.async_show_form(
             step_id="user",
@@ -98,7 +73,75 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                             AUTH_METHOD_PHONE: "Phone",
                         }
                     ),
-                    vol.Required(CONF_AUTH_VALUE): str,
+                }
+            ),
+        )
+
+    async def _async_send_code(self, auth_value: str) -> ConfigFlowResult | None:
+        """Send verification code. Returns None on success, or a step result with errors."""
+        self._auth_value = auth_value.strip()
+
+        unique_id = self._auth_value.lower()
+        await self.async_set_unique_id(unique_id)
+        self._abort_if_unique_id_configured()
+
+        session = async_get_clientsession(self.hass)
+        client = OrionApiClient(session=session)
+
+        email = self._auth_value if self._auth_method == AUTH_METHOD_EMAIL else None
+        phone = self._auth_value if self._auth_method == AUTH_METHOD_PHONE else None
+        success = await client.request_auth_code(email=email, phone=phone)
+        if not success:
+            raise OrionConnectionError("API returned success=false")
+        return None
+
+    async def async_step_email(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 1a: User enters email address."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            try:
+                result = await self._async_send_code(user_input["email"])
+                if result is None:
+                    return await self.async_step_verify()
+            except OrionConnectionError:
+                errors["base"] = "cannot_connect"
+            except OrionApiError:
+                errors["base"] = "unknown"
+
+        return self.async_show_form(
+            step_id="email",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("email"): str,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_phone(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 1b: User enters phone number."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            try:
+                result = await self._async_send_code(user_input["phone"])
+                if result is None:
+                    return await self.async_step_verify()
+            except OrionConnectionError:
+                errors["base"] = "cannot_connect"
+            except OrionApiError:
+                errors["base"] = "unknown"
+
+        return self.async_show_form(
+            step_id="phone",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("phone"): str,
                 }
             ),
             errors=errors,

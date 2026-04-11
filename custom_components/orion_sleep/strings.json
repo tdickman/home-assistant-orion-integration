@@ -3,10 +3,23 @@
     "step": {
       "user": {
         "title": "Orion Sleep Login",
-        "description": "Enter your Orion Sleep account credentials. A verification code will be sent to you.",
+        "description": "Choose how you log in to your Orion Sleep account.",
         "data": {
-          "auth_method": "Login method",
-          "auth_value": "Email address or phone number"
+          "auth_method": "Login method"
+        }
+      },
+      "email": {
+        "title": "Orion Sleep Login",
+        "description": "Enter your Orion Sleep account email. A verification code will be sent to you.",
+        "data": {
+          "email": "Email address"
+        }
+      },
+      "phone": {
+        "title": "Orion Sleep Login",
+        "description": "Enter your Orion Sleep account phone number. A verification code will be sent to you.",
+        "data": {
+          "phone": "Phone number"
         }
       },
       "verify": {
