@@ -18,12 +18,7 @@ DEFAULT_SCAN_INTERVAL = 600  # 10 minutes
 CONF_INSIGHTS_DAYS = "insights_days"
 DEFAULT_INSIGHTS_DAYS = 7
 
-# Temperature display mode
-CONF_TEMP_MODE = "temperature_mode"
-TEMP_MODE_ABSOLUTE = "absolute"  # Show real Celsius (10-45°C)
-TEMP_MODE_OFFSET = "offset"  # Show relative offset (-10 to +10) like the app
-DEFAULT_TEMP_MODE = TEMP_MODE_OFFSET
-
-# The Orion app displays temperature as an offset from a midpoint.
-# The API uses absolute Celsius (min=10, max=45). The midpoint is 27.5°C.
-TEMP_OFFSET_MIDPOINT = 27.5
+# The Orion app displays temperature as an offset from a midpoint of 27°C.
+# The API uses absolute Celsius (min=10, max=45).
+# Verified: app shows -3 when API returns 24°C (24 - 27 = -3).
+TEMP_OFFSET_MIDPOINT = 27.0

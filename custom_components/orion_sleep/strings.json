@@ -51,8 +51,7 @@
         "title": "Orion Sleep Options",
         "data": {
           "scan_interval": "Polling interval (seconds)",
-          "insights_days": "Days of sleep insights to fetch",
-          "temperature_mode": "Temperature display mode"
+          "insights_days": "Days of sleep insights to fetch"
         }
       }
     }
@@ -131,6 +130,9 @@
       },
       "wakeup_temp": {
         "name": "Wake Up Temperature"
+      },
+      "temperature_offset": {
+        "name": "Temperature Offset"
       }
     }
   }
