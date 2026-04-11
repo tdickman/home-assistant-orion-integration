@@ -298,6 +298,43 @@ SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         icon="mdi:thermometer-alert",
         value_fn=lambda schedule: schedule.get("wakeup_temp") if schedule else None,
     ),
+    # Temperature offset sensors — app-style relative values
+    OrionSensorEntityDescription(
+        key="bedtime_temp_offset",
+        translation_key="bedtime_temp_offset",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:thermometer",
+        value_fn=lambda schedule: (
+            _abs_to_offset(schedule.get("bedtime_temp")) if schedule else None
+        ),
+    ),
+    OrionSensorEntityDescription(
+        key="phase_1_temp_offset",
+        translation_key="phase_1_temp_offset",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:thermometer-chevron-down",
+        value_fn=lambda schedule: (
+            _abs_to_offset(schedule.get("phase_1_temp")) if schedule else None
+        ),
+    ),
+    OrionSensorEntityDescription(
+        key="phase_2_temp_offset",
+        translation_key="phase_2_temp_offset",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:thermometer-chevron-up",
+        value_fn=lambda schedule: (
+            _abs_to_offset(schedule.get("phase_2_temp")) if schedule else None
+        ),
+    ),
+    OrionSensorEntityDescription(
+        key="wakeup_temp_offset",
+        translation_key="wakeup_temp_offset",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:thermometer-alert",
+        value_fn=lambda schedule: (
+            _abs_to_offset(schedule.get("wakeup_temp")) if schedule else None
+        ),
+    ),
 )
 
 
@@ -360,7 +397,7 @@ async def async_setup_entry(
             entities.append(
                 OrionScheduleSensorEntity(coordinator, device_id, description)
             )
-        entities.append(OrionTemperatureOffsetSensor(coordinator, device_id))
+        entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
 
     async_add_entities(entities)
 
@@ -449,19 +486,16 @@ class OrionScheduleSensorEntity(OrionBaseEntity, SensorEntity):
         return {k: v for k, v in attrs.items() if v is not None} or None
 
 
-class OrionTemperatureOffsetSensor(OrionBaseEntity, SensorEntity):
-    """Sensor showing the current temperature as an app-style offset.
+class OrionCurrentTempOffsetSensor(OrionBaseEntity, SensorEntity):
+    """Sensor showing the current measured bed temperature as an app-style offset.
 
     The Orion app displays bed temperature as a relative offset from a
-    midpoint (27°C), e.g. -3, 0, +5. This sensor surfaces that value
-    so users see the same number they see in the mobile app.
-
-    The primary value is the target (bedtime) temperature offset from
-    today's schedule. Extra attributes include the current measured
-    offset from the latest session, plus phase/wakeup offsets.
+    midpoint (27°C), e.g. -3, 0, +5. This sensor shows the actual
+    measured temperature offset from the latest sleep session — the
+    value labeled "Now" in the app's temperature curve.
     """
 
-    _attr_translation_key = "temperature_offset"
+    _attr_translation_key = "current_temp_offset"
     _attr_icon = "mdi:thermometer"
     _attr_state_class = SensorStateClass.MEASUREMENT
 
@@ -471,45 +505,16 @@ class OrionTemperatureOffsetSensor(OrionBaseEntity, SensorEntity):
         device_id: str,
     ) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_temperature_offset"
+        self._attr_unique_id = f"{device_id}_current_temp_offset"
 
     @property
     def native_value(self) -> float | None:
-        """Return the target temperature offset from today's schedule."""
-        schedule = self.coordinator.get_today_schedule()
-        if not schedule:
-            return None
-        bedtime_temp = schedule.get("bedtime_temp")
-        return _abs_to_offset(bedtime_temp)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any] | None:
-        """Return current, phase, and wakeup offsets."""
-        attrs: dict[str, Any] = {}
-
-        # Current measured temperature offset from latest session
+        """Return the current measured temperature offset."""
         session = self.coordinator.get_latest_session()
-        if session:
-            temp_data = session.get("temperature", {})
-            values = temp_data.get("values", [])
-            if values:
-                current_offset = _abs_to_offset(values[-1])
-                if current_offset is not None:
-                    attrs["current_offset"] = current_offset
-
-        # Schedule phase offsets
-        schedule = self.coordinator.get_today_schedule()
-        if schedule:
-            for key in (
-                "bedtime_temp",
-                "phase_1_temp",
-                "phase_2_temp",
-                "wakeup_temp",
-            ):
-                val = schedule.get(key)
-                if val is not None:
-                    offset = _abs_to_offset(val)
-                    if offset is not None:
-                        attrs[f"{key}_offset"] = offset
-
-        return attrs or None
+        if not session:
+            return None
+        temp_data = session.get("temperature", {})
+        values = temp_data.get("values", [])
+        if values:
+            return _abs_to_offset(values[-1])
+        return None

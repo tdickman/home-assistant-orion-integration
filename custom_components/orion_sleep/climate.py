@@ -15,22 +15,10 @@ from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import TEMP_OFFSET_MIDPOINT
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _abs_to_offset(celsius: float | None) -> float | None:
-    """Convert absolute Celsius to relative offset from midpoint.
-
-    The Orion app displays temperature as an offset from 27°C.
-    E.g. 24°C API value -> -3 in the app.
-    """
-    if celsius is None:
-        return None
-    return round(celsius - TEMP_OFFSET_MIDPOINT, 1)
 
 
 async def async_setup_entry(
@@ -121,29 +109,6 @@ class OrionClimateEntity(OrionBaseEntity, ClimateEntity):
         if schedule and schedule.get("bedtime_is_active"):
             return HVACMode.HEAT_COOL
         return HVACMode.OFF
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return extra attributes including app-style offset values."""
-        attrs: dict[str, Any] = {}
-
-        # Current temperature offset
-        session = self.coordinator.get_latest_session()
-        if session:
-            temp_data = session.get("temperature", {})
-            values = temp_data.get("values", [])
-            if values:
-                attrs["current_offset"] = _abs_to_offset(values[-1])
-
-        # Schedule temperature offsets
-        schedule = self.coordinator.get_today_schedule()
-        if schedule:
-            for key in ("bedtime_temp", "wakeup_temp", "phase_1_temp", "phase_2_temp"):
-                val = schedule.get(key)
-                if val is not None:
-                    attrs[f"{key}_offset"] = _abs_to_offset(val)
-
-        return attrs
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set target temperature."""
