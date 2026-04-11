@@ -16,11 +16,16 @@ TO_REDACT = {
     "email",
     "phone",
     "auth_value",
-    "userId",
-    "sessionId",
+    "user_id",
+    "session_id",
+    "id",
     "name",
-    "firstName",
-    "lastName",
+    "first_name",
+    "last_name",
+    "serial_number",
+    "intercom_jwt",
+    "dob",
+    "profile_image_url",
 }
 
 

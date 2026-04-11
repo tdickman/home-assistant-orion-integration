@@ -226,6 +226,14 @@ def get_sleep_schedules(token: str) -> Any:
     return _check(resp, "get_sleep_schedules")
 
 
+def get_sleep_config_devices(token: str) -> Any:
+    """GET /v1/sleep-configurations/devices — sleep config + temp data."""
+    resp = requests.get(
+        _url("/v1/sleep-configurations/devices"), headers=_headers(token)
+    )
+    return _check(resp, "get_sleep_config_devices")
+
+
 def get_insights(token: str, days: int = 7) -> Any:
     """GET /v2/insights for the last *days* days."""
     today = date.today()
@@ -275,6 +283,10 @@ def main() -> None:
     devices = list_devices(access_token)
     if devices is not None:
         _pretty("Devices", devices)
+
+    sleep_configs = get_sleep_config_devices(access_token)
+    if sleep_configs is not None:
+        _pretty("Sleep Configurations (devices)", sleep_configs)
 
     session = get_session_state(access_token)
     if session is not None:

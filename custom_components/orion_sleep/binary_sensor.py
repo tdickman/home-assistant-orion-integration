@@ -28,7 +28,7 @@ async def async_setup_entry(
     entities: list[OrionSessionActiveBinarySensor] = []
 
     for device in coordinator.devices:
-        device_id = device.get("deviceId") or device.get("id")
+        device_id = device.get("id")
         if not device_id:
             continue
         entities.append(OrionSessionActiveBinarySensor(coordinator, device_id))
@@ -37,7 +37,11 @@ async def async_setup_entry(
 
 
 class OrionSessionActiveBinarySensor(OrionBaseEntity, BinarySensorEntity):
-    """Binary sensor indicating if a sleep session is active."""
+    """Binary sensor indicating if a sleep session is active.
+
+    Determined by checking if the latest session in insights has
+    is_in_progress == True.
+    """
 
     _attr_device_class = BinarySensorDeviceClass.RUNNING
     _attr_translation_key = "sleep_session_active"
@@ -53,5 +57,7 @@ class OrionSessionActiveBinarySensor(OrionBaseEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         """Return True if a sleep session is currently active."""
-        session = (self.coordinator.data or {}).get("session_state", {})
-        return session.get("active", False)
+        session = self.coordinator.get_latest_session()
+        if not session:
+            return False
+        return session.get("is_in_progress", False)

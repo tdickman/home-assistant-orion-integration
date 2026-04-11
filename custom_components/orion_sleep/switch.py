@@ -26,7 +26,7 @@ async def async_setup_entry(
     entities: list[OrionScheduleSwitch] = []
 
     for device in coordinator.devices:
-        device_id = device.get("deviceId") or device.get("id")
+        device_id = device.get("id")
         if not device_id:
             continue
         entities.append(OrionScheduleSwitch(coordinator, device_id))
@@ -35,7 +35,12 @@ async def async_setup_entry(
 
 
 class OrionScheduleSwitch(OrionBaseEntity, SwitchEntity):
-    """Switch entity for enabling/disabling the sleep schedule."""
+    """Switch entity for sleep schedule active state.
+
+    Real schedule data is keyed by user_id, with each day having
+    bedtime_is_active and wakeup_is_active fields. This switch reflects
+    whether today's schedule has bedtime_is_active set.
+    """
 
     _attr_translation_key = "sleep_schedule"
 
@@ -49,9 +54,11 @@ class OrionScheduleSwitch(OrionBaseEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool | None:
-        """Return True if the sleep schedule is enabled."""
-        schedules = (self.coordinator.data or {}).get("schedules", {})
-        return schedules.get("enabled", False)
+        """Return True if today's sleep schedule is active."""
+        schedule = self.coordinator.get_today_schedule()
+        if not schedule:
+            return None
+        return schedule.get("bedtime_is_active", False)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable the sleep schedule."""

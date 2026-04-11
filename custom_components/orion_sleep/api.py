@@ -82,7 +82,7 @@ class OrionApiClient:
                 if not resp.ok:
                     body = await resp.text()
                     raise OrionApiError(
-                        f"API error: {resp.status} {resp.reason} - {body}"
+                        f"API error on {method} {path}: {resp.status} {resp.reason} - {body}"
                     )
                 if resp.content_length == 0:
                     return {}
@@ -181,81 +181,81 @@ class OrionApiClient:
     # ── Data fetchers (all require valid token) ───────────────────────
 
     async def get_current_user(self) -> dict:
-        """GET /v1/auth/me — current user profile."""
+        """GET /v1/auth/me — current user profile.
+
+        Returns: {"id": ..., "email": ..., "name": ..., ...}
+        (unwrapped from response.response)
+        """
         await self.ensure_valid_token()
-        return await self._request("GET", "/v1/auth/me")
+        data = await self._request("GET", "/v1/auth/me")
+        # Real shape: {"response": {user fields}, "success": true}
+        return data.get("response", data)
 
     async def list_devices(self) -> list[dict]:
-        """GET /v1/devices — list user's Orion devices."""
+        """GET /v1/devices — list user's Orion devices.
+
+        Real shape: {"response": {"devices": [...], "shared_with": [...]}, "success": true}
+        Each device has: id, serial_number, name, model, type, capabilities,
+        temperature_range, temperature_scale, zones, orientation, timezone,
+        permissions, default_zone_id, shared_with
+        """
         await self.ensure_valid_token()
         data = await self._request("GET", "/v1/devices")
-        # API may return list directly or wrapped in a key
-        if isinstance(data, list):
-            return data
-        return data.get("devices", data.get("response", []))
-
-    async def get_sleep_config_devices(self) -> list[dict]:
-        """GET /v1/sleep-configurations/devices — sleep config + temp data."""
-        await self.ensure_valid_token()
-        data = await self._request("GET", "/v1/sleep-configurations/devices")
-        if isinstance(data, list):
-            return data
-        return data.get("response", data.get("configurations", []))
-
-    async def get_session_state(self) -> dict:
-        """GET /v1/session-state — current sleep session state."""
-        await self.ensure_valid_token()
-        data = await self._request("GET", "/v1/session-state")
-        if isinstance(data, dict) and "response" in data:
-            return data["response"]
-        return data
+        response = data.get("response", data)
+        if isinstance(response, dict):
+            return response.get("devices", [])
+        if isinstance(response, list):
+            return response
+        return []
 
     async def get_sleep_schedules(self) -> dict:
-        """GET /v1/sleep-schedules — sleep schedule configuration."""
+        """GET /v1/sleep-schedules — sleep schedule configuration.
+
+        Real shape: {"response": {"schedules": {<user_id>: [...]},
+        "today_sleep_schedule": {<user_id>: {...}},
+        "recommendations": {<user_id>: [...]}}, "success": true}
+        """
         await self.ensure_valid_token()
         data = await self._request("GET", "/v1/sleep-schedules")
-        if isinstance(data, dict) and "response" in data:
-            return data["response"]
-        return data
+        return data.get("response", data)
 
     async def get_insights(self, days: int = 7) -> dict:
-        """GET /v2/insights — sleep insights for date range."""
+        """GET /v2/insights — sleep insights for date range.
+
+        Real shape: {"user_id": "...", "data": {"YYYY-MM-DD": {date, score,
+        sessions: [{session_id, zone_id, is_in_progress, sleep_summary,
+        heart_rate, breath_rate, hrv, temperature, movement, ...}]}},
+        "overview": {"YYYY-MM-DD": {"score": N}}}
+        Note: NOT wrapped in "response" key.
+        """
         await self.ensure_valid_token()
         today = date.today()
         params = {
             "from": (today - timedelta(days=days)).isoformat(),
             "to": today.isoformat(),
         }
-        data = await self._request("GET", "/v2/insights", params=params)
-        if isinstance(data, dict) and "response" in data:
-            return data["response"]
-        return data
+        return await self._request("GET", "/v2/insights", params=params)
 
     # ── Actions ───────────────────────────────────────────────────────
 
     async def set_temperature(
-        self, device_id: str, temperature: float, side: str | None = None
+        self, device_id: str, temperature: float, zone_id: str | None = None
     ) -> dict:
-        """PUT /v1/sleep-configurations/temperature — set target temperature."""
+        """PUT /v1/sleep-configurations/temperature — set target temperature.
+
+        NOTE: The exact request body format for this endpoint has not been
+        verified against the live API. The OpenAPI spec suggests deviceId +
+        temperature + side, but the real API may differ.
+        """
         await self.ensure_valid_token()
         body: dict[str, Any] = {
             "deviceId": device_id,
             "temperature": temperature,
         }
-        if side:
-            body["side"] = side
+        if zone_id:
+            body["zone_id"] = zone_id
         return await self._request(
             "PUT", "/v1/sleep-configurations/temperature", json_data=body
-        )
-
-    async def set_user_away(self, device_id: str, side: str | None = None) -> None:
-        """POST /v1/sleep-configurations/user-away — mark user as away."""
-        await self.ensure_valid_token()
-        body: dict[str, Any] = {"deviceId": device_id}
-        if side:
-            body["side"] = side
-        await self._request(
-            "POST", "/v1/sleep-configurations/user-away", json_data=body
         )
 
     async def update_sleep_schedule(
