@@ -85,6 +85,20 @@
         "name": "Sleep Schedule"
       }
     },
+    "number": {
+      "bedtime_temp_offset": {
+        "name": "Bedtime Temperature Offset"
+      },
+      "phase_1_temp_offset": {
+        "name": "Asleep Phase 1 Offset"
+      },
+      "phase_2_temp_offset": {
+        "name": "Asleep Phase 2 Offset"
+      },
+      "wakeup_temp_offset": {
+        "name": "Wake Up Temperature Offset"
+      }
+    },
     "sensor": {
       "sleep_score": {
         "name": "Sleep Score"
@@ -133,18 +147,6 @@
       },
       "wakeup_temp": {
         "name": "Wake Up Temperature"
-      },
-      "bedtime_temp_offset": {
-        "name": "Bedtime Temperature Offset"
-      },
-      "phase_1_temp_offset": {
-        "name": "Asleep Phase 1 Offset"
-      },
-      "phase_2_temp_offset": {
-        "name": "Asleep Phase 2 Offset"
-      },
-      "wakeup_temp_offset": {
-        "name": "Wake Up Temperature Offset"
       },
       "current_temp_offset": {
         "name": "Current Temperature Offset"

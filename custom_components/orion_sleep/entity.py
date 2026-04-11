@@ -51,3 +51,21 @@ class OrionBaseEntity(CoordinatorEntity[OrionDataUpdateCoordinator]):
         if table and isinstance(table, list) and len(table) > 0:
             return table
         return DEFAULT_RELATIVE_TEMP_TABLE
+
+    def _celsius_to_offset(self, celsius: float | None) -> float | None:
+        """Convert absolute Celsius to app-style offset using the device's table."""
+        if celsius is None:
+            return None
+        table = self._get_relative_temp_table()
+        best = min(table, key=lambda e: abs(e["out"] - celsius))
+        return best["in"]
+
+    def _offset_to_celsius(self, offset: float) -> float | None:
+        """Convert app-style offset to absolute Celsius using the device's table."""
+        table = self._get_relative_temp_table()
+        for entry in table:
+            if entry["in"] == offset:
+                return entry["out"]
+        # Nearest match fallback
+        best = min(table, key=lambda e: abs(e["in"] - offset))
+        return best["out"]

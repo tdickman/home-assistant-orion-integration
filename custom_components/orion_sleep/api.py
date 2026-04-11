@@ -274,6 +274,27 @@ class OrionApiClient:
             json_data={"user_id": user_id, "is_away": is_away},
         )
 
+    async def update_schedule_temperature(
+        self, day: int, field: str, celsius: float
+    ) -> dict:
+        """Update a single temperature field on a specific schedule day.
+
+        PUT /v1/sleep-schedules with body {"schedules": [{"day": N, field: value}]}.
+        Verified against live API — partial updates work (only the specified
+        field is changed, other fields are preserved).
+
+        Args:
+            day: Day of week (0=Monday ... 6=Sunday).
+            field: One of bedtime_temp, phase_1_temp, phase_2_temp, wakeup_temp.
+            celsius: Absolute Celsius value.
+        """
+        await self.ensure_valid_token()
+        return await self._request(
+            "PUT",
+            "/v1/sleep-schedules",
+            json_data={"schedules": [{"day": day, field: celsius}]},
+        )
+
     async def update_sleep_schedule(
         self, schedule_data: dict, action: str | None = None
     ) -> dict:
