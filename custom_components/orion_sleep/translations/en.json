@@ -75,6 +75,12 @@
           "on": "Asleep",
           "off": "Not asleep"
         }
+      },
+      "sensor1_on_bed": {
+        "name": "Sensor 1 On Bed"
+      },
+      "sensor2_on_bed": {
+        "name": "Sensor 2 On Bed"
       }
     },
     "switch": {
@@ -164,6 +170,24 @@
           "device_offline": "Device offline",
           "auth_failed": "Auth failed"
         }
+      },
+      "sensor1_live_heart_rate": {
+        "name": "Sensor 1 Heart Rate"
+      },
+      "sensor2_live_heart_rate": {
+        "name": "Sensor 2 Heart Rate"
+      },
+      "sensor1_live_breath_rate": {
+        "name": "Sensor 1 Breath Rate"
+      },
+      "sensor2_live_breath_rate": {
+        "name": "Sensor 2 Breath Rate"
+      },
+      "sensor1_status_text": {
+        "name": "Sensor 1 Status"
+      },
+      "sensor2_status_text": {
+        "name": "Sensor 2 Status"
       }
     }
   }

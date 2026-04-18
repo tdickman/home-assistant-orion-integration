@@ -20,6 +20,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
+
+# Topper sensors exposed on every WS payload. Mapping to zone_a/zone_b
+# isn't verified yet, so entities are named per sensor.
+_TOPPER_SENSORS: tuple[str, ...] = ("sensor1", "sensor2")
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -352,6 +357,16 @@ async def async_setup_entry(
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionWebSocketStateSensor(coordinator, device_id))
+        for sensor_name in _TOPPER_SENSORS:
+            entities.append(
+                OrionLiveHeartRateSensor(coordinator, device_id, sensor_name)
+            )
+            entities.append(
+                OrionLiveBreathRateSensor(coordinator, device_id, sensor_name)
+            )
+            entities.append(
+                OrionSensorStatusTextSensor(coordinator, device_id, sensor_name)
+            )
 
     async_add_entities(entities)
 
@@ -523,3 +538,119 @@ class OrionWebSocketStateSensor(OrionBaseEntity, SensorEntity):
     def available(self) -> bool:
         # Always show the state — that's the whole point of this sensor.
         return True
+
+
+class _OrionLiveSensorBase(OrionBaseEntity, SensorEntity):
+    """Shared plumbing for per-topper-sensor live entities."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        sensor_name: str,
+        unique_suffix: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._sensor_name = sensor_name
+        self._attr_unique_id = f"{device_id}_{sensor_name}_{unique_suffix}"
+
+    @property
+    def available(self) -> bool:
+        # Available whenever we've seen any live frame for this device.
+        return (
+            self.coordinator.sensor_status_text(self._device_id, self._sensor_name)
+            is not None
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        block = self.coordinator._sensor_block(  # noqa: SLF001
+            self._device_id, self._sensor_name
+        )
+        if not block:
+            return None
+        return {
+            "status_text": block.get("status_text"),
+            "is_working": block.get("is_working"),
+            "firmware_version": block.get("firmware_version"),
+            "hardware_version": block.get("hardware_version"),
+        }
+
+
+class OrionLiveHeartRateSensor(_OrionLiveSensorBase):
+    """Realtime heart-rate reading from one topper sensor.
+
+    Sourced from the WS ``status.sensors.<sensor>.heart_rate`` field.
+    The raw value is 0 when the bed is empty and 255 when the sensor
+    has no reading yet — both are mapped to ``None`` so automations
+    don't react to sentinels. This is distinct from the post-session
+    ``heart_rate_avg`` insight sensor, which only updates after Orion's
+    cloud aggregates a completed session.
+    """
+
+    # HR isn't one of HA's built-in sensor device classes, so leave
+    # device_class unset and surface the value + unit only.
+    _attr_native_unit_of_measurement = "bpm"
+    _attr_icon = "mdi:heart-pulse"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        sensor_name: str,
+    ) -> None:
+        super().__init__(coordinator, device_id, sensor_name, "live_heart_rate")
+        self._attr_translation_key = f"{sensor_name}_live_heart_rate"
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.sensor_heart_rate(self._device_id, self._sensor_name)
+
+
+class OrionLiveBreathRateSensor(_OrionLiveSensorBase):
+    """Realtime breath-rate reading from one topper sensor."""
+
+    _attr_native_unit_of_measurement = "br/min"
+    _attr_icon = "mdi:lungs"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        sensor_name: str,
+    ) -> None:
+        super().__init__(coordinator, device_id, sensor_name, "live_breath_rate")
+        self._attr_translation_key = f"{sensor_name}_live_breath_rate"
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.sensor_breath_rate(self._device_id, self._sensor_name)
+
+
+class OrionSensorStatusTextSensor(_OrionLiveSensorBase):
+    """Diagnostic sensor exposing the raw ``status_text`` field.
+
+    Observed values: ``left_bed``, ``normal``. Other values likely exist
+    in the app's string tables (e.g. error states) but haven't been seen
+    on the wire yet — surfacing the raw value makes it easy to catch new
+    values without another integration release.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:sleep"
+    _attr_state_class = None  # categorical, not numeric
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        sensor_name: str,
+    ) -> None:
+        super().__init__(coordinator, device_id, sensor_name, "sensor_status")
+        self._attr_translation_key = f"{sensor_name}_status_text"
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.sensor_status_text(self._device_id, self._sensor_name)

@@ -268,6 +268,96 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         await self._ws_manager.async_stop()
         await super().async_shutdown()
 
+    # ── Live per-sensor helpers (fed by the WebSocket stream) ─────────
+    #
+    # ``live_device.{snapshot,update}`` payloads expose two in-topper
+    # sensors at ``status.sensors.sensor1`` and ``status.sensors.sensor2``.
+    # The zone->sensor mapping (sensor1 ~ zone_a vs. zone_b) has not yet
+    # been verified on the wire, so we key on the raw sensor name and let
+    # the user map them to sides in their automations.
+    #
+    # Observed payload shape (see openapi.yaml WsSensor):
+    #   status, status_text, heart_rate, breath_rate, sign_of_asleep,
+    #   sign_of_wake_up, timestamp, uptime, is_working, firmware_version,
+    #   hardware_version
+    #
+    # Observed status_text values: "left_bed" (nobody on the topper) and
+    # "normal" (someone on it, readings tracking). heart_rate/breath_rate
+    # use 255 as a "no reading yet" sentinel and 0 when the bed is empty.
+
+    # Sentinel value the topper reports for HR/BR when it has no reading
+    # yet (e.g. the first second or two after someone sits down).
+    _SENSOR_SENTINEL = 255
+
+    def _sensor_block(self, device_id: str, sensor_name: str) -> dict[str, Any] | None:
+        """Return the raw sensor payload or None if not yet seen."""
+        live = self.live_devices.get(device_id)
+        if not live:
+            return None
+        sensors = (live.get("status") or {}).get("sensors") or {}
+        block = sensors.get(sensor_name)
+        if not isinstance(block, dict):
+            return None
+        return block
+
+    def sensor_status_text(self, device_id: str, sensor_name: str) -> str | None:
+        block = self._sensor_block(device_id, sensor_name)
+        if not block:
+            return None
+        text = block.get("status_text")
+        return text if isinstance(text, str) else None
+
+    def sensor_is_on_bed(self, device_id: str, sensor_name: str) -> bool | None:
+        """Return occupancy for one topper sensor.
+
+        ``status_text == "left_bed"`` -> empty; any other value means a
+        person is on the bed. If we've never seen a frame yet, return
+        None so HA shows the sensor as unknown rather than guessing.
+        """
+        text = self.sensor_status_text(device_id, sensor_name)
+        if text is None:
+            return None
+        return text != "left_bed"
+
+    def sensor_heart_rate(self, device_id: str, sensor_name: str) -> int | None:
+        """Return the live HR for one sensor, mapping sentinels to None.
+
+        * ``0`` when the bed is empty -> None (the value would mislead
+          automations looking at raw BPM).
+        * ``255`` is the topper's "no reading yet" sentinel -> None.
+        * Any other value is returned as-is.
+        """
+        block = self._sensor_block(device_id, sensor_name)
+        if not block:
+            return None
+        hr = block.get("heart_rate")
+        if not isinstance(hr, (int, float)):
+            return None
+        hr = int(hr)
+        if hr == 0 or hr == self._SENSOR_SENTINEL:
+            return None
+        return hr
+
+    def sensor_breath_rate(self, device_id: str, sensor_name: str) -> int | None:
+        """Return the live breath rate for one sensor, with sentinel handling."""
+        block = self._sensor_block(device_id, sensor_name)
+        if not block:
+            return None
+        br = block.get("breath_rate")
+        if not isinstance(br, (int, float)):
+            return None
+        br = int(br)
+        if br == 0 or br == self._SENSOR_SENTINEL:
+            return None
+        return br
+
+    def sensor_is_working(self, device_id: str, sensor_name: str) -> bool | None:
+        block = self._sensor_block(device_id, sensor_name)
+        if not block:
+            return None
+        val = block.get("is_working")
+        return bool(val) if val is not None else None
+
     def is_user_away(self, device_id: str) -> bool | None:
         """Check whether the user is currently marked away on the device.
 

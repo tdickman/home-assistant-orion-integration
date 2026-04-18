@@ -190,12 +190,20 @@ Entities read from coordinator:
 | Sensor | Wake-up Temperature | `_wakeup_temp` | `today_sleep_schedule.wakeup_temp` |
 | Sensor | Current Temp Offset | `_current_temp_offset` | Latest session `temperature.values[-1]` converted to app-style offset |
 | Sensor (diag) | Live Connection | `_websocket_state` | WS connection state (`connecting`/`connected`/`reconnecting`/`device_offline`/`auth_failed`/`stopped`) plus `seconds_since_last_message` extra attr |
+| Sensor | Sensor 1/2 Heart Rate | `_sensorN_live_heart_rate` | WS `status.sensors.sensorN.heart_rate` (bpm). `0` (empty bed) and `255` (no reading yet) both mapped to `None`. |
+| Sensor | Sensor 1/2 Breath Rate | `_sensorN_live_breath_rate` | WS `status.sensors.sensorN.breath_rate` (br/min). Same sentinel handling. |
+| Sensor (diag) | Sensor 1/2 Status | `_sensorN_sensor_status` | Raw `status_text`: observed `left_bed` (empty) and `normal` (occupied). |
 | Binary Sensor | Sleep Session Active | `_session_active` | `session.is_in_progress` (shows "Asleep" / "Not asleep") |
+| Binary Sensor | Sensor 1/2 On Bed | `_sensorN_on_bed` | Occupancy device class. `status_text != "left_bed"`. Flips within ~2s via WS push. |
 | Switch | Power | `_power` | On = all zones on, Off = all zones off. Uses `PUT /v1/devices/{id}/live` (canonical power primitive). State read from each zone's `on`/`is_on` field. |
 | Switch | Away Mode | `_away_mode` | On = user marked away, Off = user present. State read from `zones[*].user` (null across all zones = away). `POST /v1/sleep-configurations/user-away`. Returns `400 "User has no previous device to return to"` on no-op toggle — swallowed in the switch. |
 | Switch | Sleep Schedule | `_sleep_schedule` | `today_sleep_schedule.bedtime_is_active`. Toggle via `update_sleep_schedule`. |
 
-**Per device: 1 climate + 18 sensors + 1 binary sensor + 3 switches = 23 entities**
+**Per device: 1 climate + 18 + 6 live sensors + 3 binary sensors + 3 switches = 31 entities**
+
+- 18 existing sensors (insights, schedule, offsets) + WS connection state.
+- 6 new live WS sensors: 2× Heart Rate + 2× Breath Rate + 2× Sensor Status (diag).
+- 3 binary sensors: Sleep Session Active + 2× On Bed (sensor1/sensor2).
 
 ### Sensor Implementation Notes
 
@@ -306,7 +314,8 @@ payload.timeline[]            only on update; today's scheduled actions:
 Notable:
 - `payload.zones[].temp` is the **setpoint**. The **measured** zone temperature lives at `payload.status.zones[].temp`.
 - `status.zones[].thermal_state` was only observed as `"standby"`; heating/cooling values are plausible but unobserved.
-- `sensors.sensor*.status_text` was only observed as `"left_bed"`; on-bed/awake/asleep values are plausible but unobserved.
+- `sensors.sensor*.status_text` observed values: `"left_bed"` (empty bed, HR=BR=0) and `"normal"` (occupied, realistic HR/BR). The topper also reports HR=BR=255 as a "no reading yet" sentinel in the first ~2s after someone sits down. Other values hinted at by the app strings (e.g. sitting/asleep/error) are plausible but unobserved.
+- `sensors.sensor*.sign_of_asleep` / `sign_of_wake_up` only ever observed as `1`; likely edge triggers that momentarily take another value during stage transitions (unconfirmed — a full sleep session hasn't been captured).
 
 ### Events NOT Observed (may exist, were not triggered)
 

@@ -2168,12 +2168,18 @@ components:
         status:
           type: integer
           description: |
-            Numeric status code. Observed `5` with `status_text=left_bed`.
+            Numeric status code. Observed `5` (paired with
+            `status_text=left_bed`) and `0` (paired with `status_text=normal`).
         status_text:
           type: string
           description: |
-            Observed `left_bed`. Other plausible values (`on_bed`, `asleep`,
-            `awake`) are speculative.
+            Human-readable sensor state. Observed values: `left_bed`
+            (nobody on the bed; heart_rate/breath_rate are 0) and `normal`
+            (someone on the bed; realistic readings). Other values hinted
+            at by the app's string tables (e.g. sitting/asleep/error) are
+            plausible but unobserved. The topper also briefly reports
+            heart_rate/breath_rate of `255` as a "no reading yet" sentinel
+            in the first few seconds after someone sits down.
         sign_of_asleep:
           type: integer
         sign_of_wake_up:
