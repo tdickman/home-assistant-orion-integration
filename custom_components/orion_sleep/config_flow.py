@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -34,6 +35,15 @@ _LOGGER = logging.getLogger(__name__)
 
 AUTH_METHOD_EMAIL = "email"
 AUTH_METHOD_PHONE = "phone"
+
+# Orion's auth endpoint requires a full US phone number including the leading
+# country code ("1"), e.g. 15132015808. Anything shorter is rejected server-side.
+_PHONE_RE = re.compile(r"^1\d{10}$")
+
+
+def _normalize_phone(raw: str) -> str:
+    """Strip spaces, dashes, parens and a leading + from a phone number."""
+    return re.sub(r"[\s\-\(\)\+]", "", raw or "")
 
 
 class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -128,14 +138,18 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            try:
-                result = await self._async_send_code(user_input["phone"])
-                if result is None:
-                    return await self.async_step_verify()
-            except OrionConnectionError:
-                errors["base"] = "cannot_connect"
-            except OrionApiError:
-                errors["base"] = "unknown"
+            phone = _normalize_phone(user_input["phone"])
+            if not _PHONE_RE.match(phone):
+                errors["phone"] = "invalid_phone"
+            else:
+                try:
+                    result = await self._async_send_code(phone)
+                    if result is None:
+                        return await self.async_step_verify()
+                except OrionConnectionError:
+                    errors["base"] = "cannot_connect"
+                except OrionApiError:
+                    errors["base"] = "unknown"
 
         return self.async_show_form(
             step_id="phone",

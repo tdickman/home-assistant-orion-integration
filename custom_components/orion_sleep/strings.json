@@ -17,9 +17,9 @@
       },
       "phone": {
         "title": "Orion Sleep Login",
-        "description": "Enter your Orion Sleep account phone number. A verification code will be sent to you.",
+        "description": "Enter your Orion Sleep account phone number, including the leading 1 country code (e.g. 15551234567). A verification code will be sent to you.",
         "data": {
-          "phone": "Phone number"
+          "phone": "Phone number (with leading 1, e.g. 15551234567)"
         }
       },
       "verify": {
@@ -38,6 +38,7 @@
       "cannot_connect": "Failed to connect to Orion Sleep API",
       "invalid_code": "Invalid verification code",
       "invalid_auth": "Authentication failed",
+      "invalid_phone": "Phone number must include the leading 1 country code and be 11 digits total (e.g. 15551234567).",
       "unknown": "An unexpected error occurred"
     },
     "abort": {
