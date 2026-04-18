@@ -17,9 +17,9 @@
       },
       "phone": {
         "title": "Orion Sleep Login",
-        "description": "Enter your Orion Sleep account phone number, including the leading 1 country code (e.g. 15551234567). A verification code will be sent to you.",
+        "description": "Enter your Orion Sleep account phone number. A verification code will be sent to you. Must be 11 digits, ex: 15552221234.",
         "data": {
-          "phone": "Phone number (with leading 1, e.g. 15551234567)"
+          "phone": "Phone number"
         }
       },
       "verify": {

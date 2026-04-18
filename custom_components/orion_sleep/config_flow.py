@@ -136,11 +136,19 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Step 1b: User enters phone number."""
         errors: dict[str, str] = {}
+        phone_default = ""
 
         if user_input is not None:
-            phone = _normalize_phone(user_input["phone"])
+            raw = user_input.get("phone", "")
+            phone_default = raw
+            phone = _normalize_phone(raw)
             if not _PHONE_RE.match(phone):
-                errors["phone"] = "invalid_phone"
+                _LOGGER.debug(
+                    "Rejected phone number %r (normalized: %r) — must be 11 digits starting with 1",
+                    raw,
+                    phone,
+                )
+                errors["base"] = "invalid_phone"
             else:
                 try:
                     result = await self._async_send_code(phone)
@@ -155,7 +163,7 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="phone",
             data_schema=vol.Schema(
                 {
-                    vol.Required("phone"): str,
+                    vol.Required("phone", default=phone_default): str,
                 }
             ),
             errors=errors,
