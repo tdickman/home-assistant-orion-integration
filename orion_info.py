@@ -274,10 +274,114 @@ def get_sleep_config_temperature(token: str) -> Any:
     return _check(resp, "get_sleep_config_temperature")
 
 
+# ── device power / zone control ───────────────────────────────────────────────
+#
+# Reverse-engineered from Hermes bytecode.  The app's on/off toggle calls:
+#
+#   PUT /v1/devices/{device_id}/live/zones/{zone_id}   body: {"on": bool, "temp"?: n}
+#   PUT /v1/devices/{device_id}/live                   body: {"zones": [{"id", "on", "temp"?}, ...]}
+#
+# These are the canonical power-control endpoints used by the mobile app's
+# UI toggle (useDeviceControlStore, lines 1027388-1027684 of the decompiled
+# bundle).  They are distinct from:
+#   - POST /v1/sleep-configurations/user-away   (presence / schedule override)
+#   - POST /v1/devices/{id}/activate|deactivate (pairing lifecycle, not power)
+#   - POST /v1/devices/{id}/action              (quiet_mode, reboot, etc.)
+
+
+def set_zone(
+    token: str,
+    device_id: str,
+    zone_id: str,
+    on: bool | None = None,
+    temp: float | None = None,
+) -> Any:
+    """PUT /v1/devices/{device_id}/live/zones/{zone_id} — per-zone control.
+
+    Provide `on` to toggle power and/or `temp` to set the target temperature
+    (in the device's native unit — celsius for OSCT001-1).
+    """
+    body: dict = {}
+    if on is not None:
+        body["on"] = on
+    if temp is not None:
+        body["temp"] = temp
+    if not body:
+        raise ValueError("set_zone: specify at least one of on= or temp=")
+    resp = requests.put(
+        _url(f"/v1/devices/{device_id}/live/zones/{zone_id}"),
+        json=body,
+        headers=_headers(token),
+    )
+    return _check(resp, f"set_zone({zone_id})")
+
+
+def set_device_zones(
+    token: str,
+    device_id: str,
+    zones: list[dict],
+) -> Any:
+    """PUT /v1/devices/{device_id}/live — bulk update all zones in one call.
+
+    `zones` is a list of {"id": str, "on": bool?, "temp": float?} dicts.
+    """
+    body = {"zones": zones}
+    resp = requests.put(
+        _url(f"/v1/devices/{device_id}/live"),
+        json=body,
+        headers=_headers(token),
+    )
+    return _check(resp, "set_device_zones")
+
+
+def set_device_power(
+    token: str,
+    device: dict,
+    on: bool,
+    temp: float | None = None,
+) -> Any:
+    """Turn every zone of a device on or off in a single bulk call.
+
+    Mirrors the app's "all zones" toggle path.  `device` is a device dict
+    from GET /v1/devices (must contain "id" and "zones").
+    """
+    device_id = device["id"]
+    zone_list = device.get("zones") or []
+    zones_body: list[dict] = []
+    for z in zone_list:
+        entry: dict = {"id": z["id"], "on": on}
+        if temp is not None:
+            entry["temp"] = temp
+        zones_body.append(entry)
+    if not zones_body:
+        raise ValueError("set_device_power: device has no zones")
+    return set_device_zones(token, device_id, zones_body)
+
+
 # ── websocket ──────────────────────────────────────────────────────────────
+#
+# Reverse-engineered from the Hermes bytecode in the Orion Android APK:
+#
+#   URL: wss://live.api1.orionbed.com/device/<serial_number>?token=<JWT>
+#
+# Key findings (from decompilation of useDeviceWebSocket):
+#   - The path is `/device/<serial_number>` (the device's serial_number, NOT
+#     its UUID/id).  The server responds 400 for `/device/` (missing serial)
+#     and 404 with {"error":"Not Found","message":"Device not found"} for
+#     any non-serial value.
+#   - The token is a URL-encoded query parameter (not a header or subprotocol).
+#   - There is NO JSON subscribe/unsubscribe handshake.  The server pushes
+#     messages immediately on connect, starting with a `live_device.snapshot`.
+#   - One WebSocket is opened per device.  The app's useDeviceWebSocket hook
+#     ties the connection to the currently selected device.
+#   - On background, the client closes with code 1001.
+#
+# Known server -> client message shapes:
+#   {"type":"live_device.snapshot","payload":{
+#      "serial_number":"…","model":"…","zones":[{"id":"zone_a","temp":20.5,"on":false},…],
+#      "led_brightness":0,"water_fill":"unknown",…}}
 
 WS_BASE_URL = "wss://live.api1.orionbed.com"
-WS_TOPIC = "live/zones/actionState"
 
 
 def _ws_ssl_context() -> ssl.SSLContext:
@@ -291,47 +395,28 @@ def _ws_ssl_context() -> ssl.SSLContext:
     return ctx
 
 
-async def _ws_connect_and_listen(
+async def _ws_listen_one(
     token: str,
-    device_ids: list[str],
-    duration: float = 60.0,
+    serial: str,
+    duration: float,
+    stop: asyncio.Event,
 ) -> None:
-    """Connect to the Orion live WebSocket, subscribe to devices, and log messages.
-
-    Protocol (from openapi.yaml x-websocket):
-      - URL: wss://live.api1.orionbed.com?token=<JWT>
-      - After connect, send: {"action":"subscribe","topic":"live/zones/actionState","deviceId":"<id>"}
-      - Server pushes JSON: {topic, event, data}
-    """
+    """Open one /device/<serial> WebSocket and log incoming messages."""
     import websockets
+    from urllib.parse import quote
 
-    url = f"{WS_BASE_URL}?token={token}"
-    print(f"\nConnecting to {WS_BASE_URL}?token=<JWT>...")
-    print(f"  Devices to subscribe: {device_ids}")
+    url = f"{WS_BASE_URL}/device/{quote(serial, safe='')}?token={token}"
+    print(f"\nConnecting to {WS_BASE_URL}/device/{serial}?token=<JWT>")
     print(f"  Duration: {duration:.0f}s  (Ctrl+C to stop)\n")
 
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
-
     try:
-        async with websockets.connect(url, ssl=_ws_ssl_context()) as ws:
-            print("[CONNECTED] WebSocket connection established.\n")
+        async with websockets.connect(
+            url,
+            ssl=_ws_ssl_context(),
+            user_agent_header="okhttp/4.12.0",
+        ) as ws:
+            print(f"[CONNECTED] serial={serial}\n")
 
-            # Subscribe to each device
-            for device_id in device_ids:
-                sub_msg = {
-                    "action": "subscribe",
-                    "topic": WS_TOPIC,
-                    "deviceId": device_id,
-                }
-                await ws.send(json.dumps(sub_msg))
-                print(f"[SUBSCRIBE] topic={WS_TOPIC}  deviceId={device_id}")
-
-            print()
-
-            # Listen for messages
             deadline = asyncio.get_event_loop().time() + duration
             count = 0
             while not stop.is_set():
@@ -352,59 +437,55 @@ async def _ws_connect_and_listen(
                 except TimeoutError:
                     pass
 
-            # Clean unsubscribe
-            for device_id in device_ids:
-                unsub_msg = {
-                    "action": "unsubscribe",
-                    "topic": WS_TOPIC,
-                }
-                try:
-                    await ws.send(json.dumps(unsub_msg))
-                except Exception:
-                    pass
-
             print(f"\nTotal messages received: {count}")
 
-            # Close with 1001 (going away), matching the app's behavior
+            # Match the app's shutdown behavior (AppState -> background)
             await ws.close(1001, "client shutdown")
 
     except websockets.exceptions.InvalidStatus as e:
         print(f"[ERROR] WebSocket upgrade rejected: HTTP {e.response.status_code}")
-        if e.response.status_code == 200:
-            print(
-                "\n  The server returned HTTP 200 instead of 101 Switching Protocols."
-                "\n  This means the Cloudflare proxy is not forwarding the WebSocket"
-                "\n  upgrade to the backend. The Orion mobile app (React Native /"
-                "\n  OkHttp) connects from a mobile network where Cloudflare may"
-                "\n  route the traffic differently."
-                "\n"
-                "\n  Possible causes:"
-                "\n    - Cloudflare WebSocket support is disabled for this route"
-                "\n    - The backend is not listening for WebSocket upgrades at /"
-                "\n    - A Cloudflare Worker or firewall rule blocks non-mobile clients"
-                "\n"
-                "\n  The server health check responds:"
-            )
-            if hasattr(e.response, "body") and e.response.body:
-                print(f"    {e.response.body.decode('utf-8', errors='replace')}")
-        elif e.response.status_code == 401:
+        if hasattr(e.response, "body") and e.response.body:
+            print(f"  Body: {e.response.body.decode('utf-8', errors='replace')}")
+        if e.response.status_code == 401:
             print("  Token may be expired or invalid. Try --relogin.")
+        elif e.response.status_code == 404:
+            print(
+                "  Device not found. The WebSocket path uses the device's"
+                "\n  serial_number (not its UUID)."
+            )
     except Exception as e:
         print(f"[ERROR] WebSocket failed: {type(e).__name__}: {e}")
 
 
-def run_websocket(
+async def _ws_connect_and_listen(
     token: str,
-    device_ids: list[str],
+    serials: list[str],
     duration: float = 60.0,
 ) -> None:
-    """Entry point for the --websocket flag."""
-    if not device_ids:
-        print("\n[ERROR] No device IDs found — cannot subscribe to WebSocket.")
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+
+    # The app opens one WS per device.  Do the same — run them concurrently.
+    await asyncio.gather(*(_ws_listen_one(token, s, duration, stop) for s in serials))
+
+
+def run_websocket(
+    token: str,
+    serials: list[str],
+    duration: float = 60.0,
+) -> None:
+    """Entry point for the --websocket flag.
+
+    `serials` must be device serial_numbers (NOT UUIDs).
+    """
+    if not serials:
+        print("\n[ERROR] No device serial numbers found — cannot open WebSocket.")
         print("  Make sure you have at least one device on your account.")
         return
 
-    asyncio.run(_ws_connect_and_listen(token, device_ids, duration))
+    asyncio.run(_ws_connect_and_listen(token, serials, duration))
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -532,9 +613,12 @@ def main() -> None:
 
     # ── WebSocket ─────────────────────────────────────────────────────
     if args.websocket:
-        # Extract device IDs from the already-fetched device list
-        ws_device_ids = [d.get("id") for d in device_list if d.get("id")]
-        run_websocket(access_token, ws_device_ids, duration=args.ws_duration)
+        # The WS path is /device/<serial_number>?token=<JWT> (reverse-engineered
+        # from the Android APK's Hermes bytecode).  Use serial_number, not id.
+        ws_serials = [
+            d.get("serial_number") for d in device_list if d.get("serial_number")
+        ]
+        run_websocket(access_token, ws_serials, duration=args.ws_duration)
 
 
 if __name__ == "__main__":

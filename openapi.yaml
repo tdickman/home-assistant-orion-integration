@@ -11,12 +11,8 @@ info:
     zone data (configured via EXPO_PUBLIC_LIVE_WS_URL). The WebSocket protocol
     is documented under the `GET /ws` path and the `x-websocket` extension.
 
-    **Note:** Request/response schemas were initially inferred from decompiled Hermes
-    bytecode string tables. Auth endpoints (code, verify, refresh) have been verified
-    against the live API — session tokens use snake_case field names (access_token,
-    refresh_token, expires_at) and the verify/refresh responses wrap tokens in a nested
-    {"response": {"session": {...}}} structure. Other endpoint schemas remain
-    best-effort approximations.
+    **Note:** Request/response schemas are inferred from decompiled Hermes bytecode
+    string tables. Field names and types are best-effort approximations.
   version: 1.0.0
   contact:
     name: Orion Longevity
@@ -108,14 +104,13 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
 
-  /v1/auth/verify:
+  /v1/auth/do:
     post:
       operationId: executeAuthAction
-      summary: Verify authentication code
+      summary: Execute an authentication action
       description: |
         Verifies the code sent via /v1/auth/code and completes sign-in or sign-up.
-        Returns a wrapped response containing session tokens and user profile.
-        Tokens are nested under response.session (see AuthTokens schema).
+        Returns access and refresh tokens on success.
       tags: [Auth]
       security: []
       requestBody:
@@ -200,10 +195,6 @@ paths:
       description: |
         Exchanges a refresh token for a new access/refresh token pair.
         Used automatically by the app and before WebSocket reconnection.
-
-        NOTE: The response may be wrapped under response.session (same as
-        /v1/auth/verify) OR returned at the top level. Clients must handle
-        both shapes.
       tags: [Auth]
       security: []
       requestBody:
@@ -212,22 +203,18 @@ paths:
           application/json:
             schema:
               type: object
-              required: [refresh_token]
+              required: [refreshToken]
               properties:
-                refresh_token:
+                refreshToken:
                   type: string
-                  description: Current refresh token
+                  description: Current refresh token (JWT)
       responses:
         "200":
-          description: |
-            New token pair. May be wrapped in {"response": {"session": ...}}
-            or returned directly as a flat AuthSession object.
+          description: New token pair
           content:
             application/json:
               schema:
-                oneOf:
-                  - $ref: "#/components/schemas/AuthTokens"
-                  - $ref: "#/components/schemas/AuthSession"
+                $ref: "#/components/schemas/AuthTokens"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -330,6 +317,265 @@ paths:
                 $ref: "#/components/schemas/Device"
         "400":
           $ref: "#/components/responses/BadRequest"
+
+  /v1/devices/{deviceId}:
+    put:
+      operationId: updateDevice
+      summary: Update device metadata
+      description: |
+        Updates device-level metadata (name, orientation, timezone, etc.).
+        Used for the "Device Settings" screen. Does **not** control power or
+        temperature — use `/v1/devices/{deviceId}/live[/zones/{zoneId}]` for that.
+
+        Decompiled bytecode reference: `updateDevice` at line 488978 of the
+        Hermes bundle; URL built via `HermesInternal.concat('/v1/devices/', id)`.
+      tags: [Devices]
+      parameters:
+        - $ref: "#/components/parameters/DeviceIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Partial device-metadata update (any subset of fields).
+              properties:
+                name:
+                  type: string
+                orientation:
+                  type: string
+                  enum: [left, right]
+                timezone:
+                  type: string
+                  description: IANA timezone (e.g. `America/Denver`)
+      responses:
+        "200":
+          description: Device updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/devices/{deviceId}/live:
+    put:
+      operationId: updateLiveDeviceZones
+      summary: Bulk update all zones (power / temperature)
+      description: |
+        Updates the live runtime state of one or more zones on a device in a
+        single call. This is the canonical **power control** endpoint used by
+        the app's "all zones" toggle and is the preferred way to turn the
+        mattress topper on or off.
+
+        The `user-away` flag on `POST /v1/sleep-configurations/user-away` also
+        causes the mattress to power down, but it is a presence / schedule
+        override rather than a power primitive — prefer this endpoint for
+        direct control.
+
+        Decompiled bytecode reference: `updateLiveDeviceZones` at line 881425;
+        URL `'/v1/devices/' + id + '/live'`; body built at line 1027574.
+
+        **Note:** `temp` values are in the device's native unit (celsius for
+        the OSCT001-1). Use `GET /v1/devices` → `temperature_scale` to convert
+        from fahrenheit or relative scales.
+      tags: [Devices]
+      parameters:
+        - $ref: "#/components/parameters/DeviceIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [zones]
+              properties:
+                zones:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: "#/components/schemas/LiveZoneUpdate"
+            examples:
+              turnAllOn:
+                summary: Turn both zones on at 20.5°C
+                value:
+                  zones:
+                    - { id: "zone_a", on: true, temp: 20.5 }
+                    - { id: "zone_b", on: true, temp: 20.5 }
+              turnAllOff:
+                summary: Turn both zones off
+                value:
+                  zones:
+                    - { id: "zone_a", on: false }
+                    - { id: "zone_b", on: false }
+      responses:
+        "200":
+          description: Zones updated — a `live_device.snapshot` will be pushed over the WebSocket reflecting the new state.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Device not found
+
+  /v1/devices/{deviceId}/live/zones/{zoneId}:
+    put:
+      operationId: updateLiveDeviceZone
+      summary: Update a single zone (power / temperature)
+      description: |
+        Updates one zone's live runtime state. Used by the per-side toggle
+        and per-side temperature sliders in the app.
+
+        Decompiled bytecode reference: `updateLiveDeviceZone` at line 881233;
+        URL `'/v1/devices/' + id + '/live/zones/' + zoneId`; body at line 1027481.
+
+        At least one of `on` or `temp` must be provided.
+      tags: [Devices]
+      parameters:
+        - $ref: "#/components/parameters/DeviceIdPath"
+        - name: zoneId
+          in: path
+          required: true
+          description: Zone identifier (e.g. `zone_a`, `zone_b`).
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                on:
+                  type: boolean
+                  description: Power state for this zone.
+                temp:
+                  type: number
+                  format: float
+                  description: Target temperature in the device's native unit (°C for OSCT001-1).
+            examples:
+              turnOn:
+                value: { on: true }
+              setTempOnly:
+                value: { temp: 22.0 }
+              onAndTemp:
+                value: { on: true, temp: 22.0 }
+      responses:
+        "200":
+          description: Zone updated — a `live_device.snapshot` will be pushed over the WebSocket reflecting the new state.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Device or zone not found
+
+  /v1/devices/{deviceId}/action:
+    post:
+      operationId: deviceAction
+      summary: Perform a device-level action
+      description: |
+        Executes a named device action (quiet mode, reboot, LED brightness,
+        forget wifi, reset, etc.). The set of allowed actions is carried on
+        each device as `permissions.allowed_actions` in `GET /v1/devices`.
+
+        **This is NOT a power endpoint.** Turning the mattress on/off goes
+        through `PUT /v1/devices/{deviceId}/live[/zones/{zoneId}]`. The
+        `DeviceAllowedAction` enum in the bundle (line 518877) contains no
+        `turn_on` / `turn_off` / `power_*` member.
+
+        Decompiled bytecode reference: `deviceAction` at line 489446;
+        URL `'/v1/devices/' + id + '/action'`.
+      tags: [Devices]
+      parameters:
+        - $ref: "#/components/parameters/DeviceIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  $ref: "#/components/schemas/DeviceAllowedAction"
+                value:
+                  description: Action-specific payload (e.g. brightness level).
+      responses:
+        "200":
+          description: Action accepted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/devices/{deviceId}/activate:
+    post:
+      operationId: activateDevice
+      summary: Activate (pair) a device
+      description: |
+        Pairing / setup lifecycle endpoint, called during onboarding after
+        BLE provisioning. Despite the name, this is **not** a power-on —
+        it registers the device to the account.
+
+        Decompiled bytecode reference: `activateDevice` at line 489345;
+        failure string `'Failed to activate device'` at line 489378.
+      tags: [Devices]
+      parameters:
+        - $ref: "#/components/parameters/DeviceIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model]
+              properties:
+                model:
+                  type: string
+                  example: "OSCT001-1"
+      responses:
+        "200":
+          description: Device activated
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /v1/devices/{deviceId}/deactivate:
+    post:
+      operationId: deactivateDevice
+      summary: Deactivate (unpair) a device
+      description: |
+        Pairing removal / teardown endpoint. **Not** a power-off — this
+        unregisters the device from the account.
+
+        Decompiled bytecode reference: `deactivateDevice` at line 489545;
+        failure string `'Failed to deactivate device'` at line 489572.
+      tags: [Devices]
+      parameters:
+        - $ref: "#/components/parameters/DeviceIdPath"
+      responses:
+        "200":
+          description: Device deactivated
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /v1/devices/{deviceId}/update:
+    post:
+      operationId: triggerDeviceFirmwareUpdate
+      summary: Trigger a device firmware update
+      description: |
+        Instructs the device to begin a firmware update workflow.
+
+        Decompiled bytecode reference: line 489645.
+      tags: [Devices]
+      parameters:
+        - $ref: "#/components/parameters/DeviceIdPath"
+      responses:
+        "200":
+          description: Update triggered
 
   # ──────────────────────────────────────────────
   #  Sleep Configurations
@@ -1005,7 +1251,7 @@ paths:
         wss://live.api1.orionbed.com?token=<JWT>
         ```
 
-        The JWT access token (obtained from `POST /v1/auth/verify` or
+        The JWT access token (obtained from `POST /v1/auth/do` or
         `POST /v1/auth/refresh`) is passed as a `token` query parameter.
         The server validates the token and associates the connection with
         the authenticated user's devices.
@@ -1202,7 +1448,7 @@ paths:
 
         | Endpoint | Relationship |
         |---|---|
-        | `POST /v1/auth/verify` | Obtain initial JWT for `?token=` |
+        | `POST /v1/auth/do` | Obtain initial JWT for `?token=` |
         | `POST /v1/auth/refresh` | Refresh JWT before reconnection |
         | `GET /v1/session-state` | HTTP fallback for session state |
         | `PUT /v1/sleep-configurations/temperature` | HTTP-based temperature control (debounced) |
@@ -1268,7 +1514,7 @@ x-websocket:
     parameter: token
     format: JWT
     description: |
-      The JWT access token from /v1/auth/verify is appended as ?token=<jwt>.
+      The JWT access token from /v1/auth/do is appended as ?token=<jwt>.
       On auth errors the client refreshes via /v1/auth/refresh and reconnects.
 
   topics:
@@ -1362,10 +1608,9 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: |
-        JWT Bearer token obtained from /v1/auth/verify.
-        Refresh via /v1/auth/refresh. The token field name in API
-        responses is access_token (snake_case). The session object
-        also includes an expires_at Unix timestamp for expiry checks.
+        JWT Bearer token obtained from /v1/auth/do.
+        Refresh via /v1/auth/refresh. The app validates tokens
+        using isValidJWT before use.
 
   responses:
     BadRequest:
@@ -1392,40 +1637,26 @@ components:
               message:
                 type: string
 
+  parameters:
+    DeviceIdPath:
+      name: deviceId
+      in: path
+      required: true
+      description: Device UUID (the `id` field returned by `GET /v1/devices`).
+      schema:
+        type: string
+        format: uuid
+
   schemas:
     AuthTokens:
       type: object
-      description: |
-        Actual response is wrapped: {"response": {"session": <Session>, "user": <User>}, "success": true}
       properties:
-        response:
-          type: object
-          properties:
-            session:
-              $ref: "#/components/schemas/AuthSession"
-            user:
-              $ref: "#/components/schemas/User"
-        success:
-          type: boolean
-
-    AuthSession:
-      type: object
-      properties:
-        access_token:
+        accessToken:
           type: string
           description: JWT access token
-        refresh_token:
+        refreshToken:
           type: string
-          description: Opaque refresh token
-        token_type:
-          type: string
-          example: "bearer"
-        expires_in:
-          type: integer
-          description: Token lifetime in seconds
-        expires_at:
-          type: integer
-          description: Unix timestamp when the access token expires
+          description: JWT refresh token for obtaining new access tokens
 
     User:
       type: object
@@ -1470,6 +1701,53 @@ components:
         batteryLevel:
           type: number
           format: float
+
+    LiveZoneUpdate:
+      type: object
+      description: |
+        Partial update to a single zone's live state, sent to
+        `PUT /v1/devices/{deviceId}/live[/zones/{zoneId}]`.
+        At least one of `on` or `temp` must be provided.
+      minProperties: 1
+      properties:
+        id:
+          type: string
+          description: |
+            Zone id (e.g. `zone_a`, `zone_b`). Required when used inside
+            the `zones` array of `PUT /v1/devices/{deviceId}/live`;
+            omitted for the per-zone endpoint where the id is in the path.
+        on:
+          type: boolean
+          description: Power state for this zone.
+        temp:
+          type: number
+          format: float
+          description: Target temperature in the device's native unit (°C for OSCT001-1).
+
+    DeviceAllowedAction:
+      type: string
+      description: |
+        Action names accepted by `POST /v1/devices/{deviceId}/action`.
+        Extracted from the `DeviceAllowedAction` enum in the decompiled
+        bundle (line 518877) and the `permissions.allowed_actions` array
+        returned by `GET /v1/devices`.
+
+        **No on/off/power action exists in this enum** — power is controlled
+        via `PUT /v1/devices/{deviceId}/live[/zones/{zoneId}]`.
+      enum:
+        - split
+        - swap
+        - device_name
+        - device_orientation
+        - device_led_brightness
+        - device_quiet_mode
+        - device_reboot
+        - device_reset
+        - device_forget_wifi
+        - device_deactivate
+        - invite_user
+        - add_new_guest
+        - remove_guest
 
     SleepConfiguration:
       type: object

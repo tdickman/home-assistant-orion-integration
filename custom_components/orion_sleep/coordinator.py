@@ -135,10 +135,12 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         return False
 
     def is_device_on(self, device_id: str) -> bool | None:
-        """Check if the device is on (user present, not away).
+        """Check if the device is on.
 
-        When the user is "away" (device off), the device's zones lose
-        their user assignment. When present (on), zones have a user dict.
+        Reads the per-zone `on` / `is_on` field as set by
+        `PUT /v1/devices/{id}/live`. Returns True if any zone is on,
+        False if all zones report off, and None if no zone exposes a
+        power field.
         """
         for device in self.devices:
             if device.get("id") != device_id:
@@ -146,10 +148,17 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             zones = device.get("zones", [])
             if not zones:
                 return None
-            # Check if any zone has this user assigned
+
+            saw_explicit = False
+            any_on = False
             for zone in zones:
-                zone_user = zone.get("user")
-                if zone_user and zone_user.get("id") == self.user_id:
-                    return True
-            return False
+                for key in ("on", "is_on"):
+                    if key in zone:
+                        saw_explicit = True
+                        if zone.get(key):
+                            any_on = True
+                        break
+            if not saw_explicit:
+                return None
+            return any_on
         return None

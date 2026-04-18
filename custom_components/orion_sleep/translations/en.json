@@ -81,6 +81,9 @@
       "power": {
         "name": "Power"
       },
+      "away_mode": {
+        "name": "Away Mode"
+      },
       "sleep_schedule": {
         "name": "Sleep Schedule"
       }

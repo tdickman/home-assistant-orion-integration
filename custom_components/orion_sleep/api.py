@@ -259,10 +259,15 @@ class OrionApiClient:
         )
 
     async def set_user_away(self, user_id: str, is_away: bool) -> dict:
-        """POST /v1/sleep-configurations/user-away — toggle device power.
+        """POST /v1/sleep-configurations/user-away — toggle away/presence.
 
-        is_away=True turns the mattress off (user marked as away).
-        is_away=False turns the mattress on (user marked as present).
+        is_away=True marks the user as away (presence override that also
+        powers the mattress down); is_away=False marks present.
+
+        NOTE: For direct power control, prefer `update_live_device_zones`
+        (PUT /v1/devices/{id}/live) — it's the canonical power primitive
+        per the OpenAPI spec. `set_user_away` is a presence/schedule
+        override that happens to power the device down.
 
         The response returns the updated device list. When away, zones
         lose their user assignment; when present, users are re-assigned.
@@ -273,6 +278,99 @@ class OrionApiClient:
             "/v1/sleep-configurations/user-away",
             json_data={"user_id": user_id, "is_away": is_away},
         )
+
+    # ── Device live / metadata / action endpoints ─────────────────────
+
+    async def update_device(self, device_id: str, **fields: Any) -> dict:
+        """PUT /v1/devices/{deviceId} — update device metadata.
+
+        Accepts any subset of: name, orientation ("left"/"right"),
+        timezone (IANA). Does NOT control power or temperature.
+        """
+        await self.ensure_valid_token()
+        return await self._request("PUT", f"/v1/devices/{device_id}", json_data=fields)
+
+    async def update_live_device_zones(self, device_id: str, zones: list[dict]) -> dict:
+        """PUT /v1/devices/{deviceId}/live — bulk update zone power/temp.
+
+        This is the canonical power control endpoint. Each zone dict must
+        include `id` and at least one of `on` (bool) or `temp` (float,
+        Celsius for OSCT001-1).
+
+        Example:
+            zones=[{"id": "zone_a", "on": True, "temp": 20.5},
+                   {"id": "zone_b", "on": False}]
+        """
+        await self.ensure_valid_token()
+        return await self._request(
+            "PUT",
+            f"/v1/devices/{device_id}/live",
+            json_data={"zones": zones},
+        )
+
+    async def update_live_device_zone(
+        self,
+        device_id: str,
+        zone_id: str,
+        *,
+        on: bool | None = None,
+        temp: float | None = None,
+    ) -> dict:
+        """PUT /v1/devices/{deviceId}/live/zones/{zoneId} — single-zone update.
+
+        At least one of `on` or `temp` must be provided. `temp` is in the
+        device's native unit (Celsius for OSCT001-1).
+        """
+        await self.ensure_valid_token()
+        body: dict[str, Any] = {}
+        if on is not None:
+            body["on"] = on
+        if temp is not None:
+            body["temp"] = temp
+        if not body:
+            raise ValueError("update_live_device_zone requires `on` or `temp`")
+        return await self._request(
+            "PUT",
+            f"/v1/devices/{device_id}/live/zones/{zone_id}",
+            json_data=body,
+        )
+
+    async def device_action(
+        self, device_id: str, action: str, value: Any | None = None
+    ) -> dict:
+        """POST /v1/devices/{deviceId}/action — perform device action.
+
+        Not a power endpoint. Valid actions (per DeviceAllowedAction enum):
+        split, swap, device_name, device_orientation, device_led_brightness,
+        device_quiet_mode, device_reboot, device_reset, device_forget_wifi,
+        device_deactivate, invite_user, add_new_guest, remove_guest.
+        """
+        await self.ensure_valid_token()
+        body: dict[str, Any] = {"action": action}
+        if value is not None:
+            body["value"] = value
+        return await self._request(
+            "POST", f"/v1/devices/{device_id}/action", json_data=body
+        )
+
+    async def activate_device(self, device_id: str, model: str) -> dict:
+        """POST /v1/devices/{deviceId}/activate — pair/register a device."""
+        await self.ensure_valid_token()
+        return await self._request(
+            "POST",
+            f"/v1/devices/{device_id}/activate",
+            json_data={"model": model},
+        )
+
+    async def deactivate_device(self, device_id: str) -> dict:
+        """POST /v1/devices/{deviceId}/deactivate — unpair a device."""
+        await self.ensure_valid_token()
+        return await self._request("POST", f"/v1/devices/{device_id}/deactivate")
+
+    async def trigger_firmware_update(self, device_id: str) -> dict:
+        """POST /v1/devices/{deviceId}/update — trigger firmware update."""
+        await self.ensure_valid_token()
+        return await self._request("POST", f"/v1/devices/{device_id}/update")
 
     async def update_schedule_temperature(
         self, day: int, field: str, celsius: float

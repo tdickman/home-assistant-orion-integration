@@ -17,7 +17,7 @@ home-assistant-orion-integration/
 │       ├── __init__.py                # async_setup_entry / async_unload_entry
 │       ├── manifest.json              # HA integration manifest (v1.0.0)
 │       ├── const.py                   # DOMAIN, config keys, defaults, temp lookup table
-│       ├── api.py                     # Async aiohttp API client (308 lines)
+│       ├── api.py                     # Async aiohttp API client
 │       ├── coordinator.py             # DataUpdateCoordinator + data helpers
 │       ├── config_flow.py             # Three-step auth flow + options flow
 │       ├── entity.py                  # Base entity with DeviceInfo + temp conversion helpers
@@ -53,7 +53,14 @@ https://api1.orionbed.com
 | GET | `/v1/devices` | Bearer | Devices at `response.devices[]`. Fields: `id`, `serial_number`, `name`, `model`, `zones[]`, `temperature_range`, `temperature_scale` |
 | GET | `/v1/sleep-schedules` | Bearer | Schedules at `response.schedules.{user_id}[]` (7 days). Also `today_sleep_schedule.{user_id}` |
 | PUT | `/v1/sleep-schedules` | Bearer | Update schedule. Body: `{"schedules": [{"day": N, field: value}]}`. Partial updates work (only specified field changes). |
-| POST | `/v1/sleep-configurations/user-away` | Bearer | Toggle device power. Body: `{"user_id": "...", "is_away": bool}`. When away, zones lose user assignment. |
+| POST | `/v1/sleep-configurations/user-away` | Bearer | Presence override. Body: `{"user_id": "...", "is_away": bool}`. Also powers the device down; prefer `/v1/devices/{id}/live` for pure power control. |
+| PUT | `/v1/devices/{deviceId}` | Bearer | Update metadata (`name`, `orientation`, `timezone`). Partial updates accepted. |
+| PUT | `/v1/devices/{deviceId}/live` | Bearer | **Canonical power/temp primitive.** Body: `{"zones": [{"id": "zone_a", "on": bool, "temp": float}, ...]}`. Each zone requires `id` and at least one of `on`/`temp` (Celsius). |
+| PUT | `/v1/devices/{deviceId}/live/zones/{zoneId}` | Bearer | Single-zone power/temp. Body: `{on?, temp?}` with `minProperties: 1`. |
+| POST | `/v1/devices/{deviceId}/action` | Bearer | Device action (quiet_mode, reboot, LED brightness, etc.). **No power action** — `DeviceAllowedAction` enum contains no on/off. Body: `{"action": "...", "value"?: ...}`. |
+| POST | `/v1/devices/{deviceId}/activate` | Bearer | Pair device to account. Body: `{"model": "OSCT001-1"}`. |
+| POST | `/v1/devices/{deviceId}/deactivate` | Bearer | Unpair device. |
+| POST | `/v1/devices/{deviceId}/update` | Bearer | Trigger firmware update. |
 | GET | `/v2/insights?from=&to=` | Bearer | NOT wrapped in `response`. Top-level: `{user_id, data: {date: {score, sessions[]}}, overview: {date: {score}}}` |
 
 ### Non-Working / Unverified Endpoints
@@ -101,7 +108,7 @@ https://api1.orionbed.com
 - Temperature values throughout the API are in **Celsius**
 - Device zones are `zone_a`/`zone_b`, not `left`/`right`
 - Sleep session detection uses `is_in_progress` from insights, not `/v1/session-state`
-- When user is "away" (device off), device zones lose their `user` field — this is how power state is detected
+- Device power state is read from each zone's `on`/`is_on` field (set via `PUT /v1/devices/{id}/live`); `set_user_away` affects the `user` field but is a separate presence override
 - Temperature offsets (app-style -10 to +10) map **non-linearly** to absolute Celsius via `temperature_scale.relative` table
 
 ## Architecture
@@ -138,7 +145,7 @@ Entities read from coordinator:
   - Climate: schedule (target temp, HVAC mode) + session (current temp)
   - Sensors: insights sessions + schedule + overview scores
   - Binary sensor: session.is_in_progress
-  - Switches: device zones (power) + schedule.bedtime_is_active
+  - Switches: device zones (power + away mode) + schedule.bedtime_is_active
 ```
 
 ## Entities
@@ -164,10 +171,11 @@ Entities read from coordinator:
 | Sensor | Wake-up Temperature | `_wakeup_temp` | `today_sleep_schedule.wakeup_temp` |
 | Sensor | Current Temp Offset | `_current_temp_offset` | Latest session `temperature.values[-1]` converted to app-style offset |
 | Binary Sensor | Sleep Session Active | `_session_active` | `session.is_in_progress` (shows "Asleep" / "Not asleep") |
-| Switch | Power | `_power` | On/off via `set_user_away` API. State from zone user assignment. |
+| Switch | Power | `_power` | On = all zones on, Off = all zones off. Uses `PUT /v1/devices/{id}/live` (canonical power primitive). State read from each zone's `on`/`is_on` field. |
+| Switch | Away Mode | `_away_mode` | On = user away (presence override also powers device down), Off = user present. Uses `set_user_away` API. |
 | Switch | Sleep Schedule | `_sleep_schedule` | `today_sleep_schedule.bedtime_is_active`. Toggle via `update_sleep_schedule`. |
 
-**Per device: 1 climate + 17 sensors + 1 binary sensor + 2 switches = 21 entities**
+**Per device: 1 climate + 17 sensors + 1 binary sensor + 3 switches = 22 entities**
 
 ### Sensor Implementation Notes
 
@@ -192,8 +200,15 @@ Entities read from coordinator:
 ### Action Methods
 | Method | Endpoint | Status |
 |--------|----------|--------|
-| `set_temperature(device_id, temperature, zone_id)` | `PUT /v1/sleep-configurations/temperature` | **Unverified** |
-| `set_user_away(user_id, is_away)` | `POST /v1/sleep-configurations/user-away` | Working (used by power switch) |
+| `set_temperature(device_id, temperature, zone_id)` | `PUT /v1/sleep-configurations/temperature` | **Unverified** (prefer `update_live_device_zone[s]`) |
+| `set_user_away(user_id, is_away)` | `POST /v1/sleep-configurations/user-away` | Working (used by away-mode switch; presence override) |
+| `update_device(device_id, **fields)` | `PUT /v1/devices/{deviceId}` | Metadata updates (name/orientation/timezone) |
+| `update_live_device_zones(device_id, zones)` | `PUT /v1/devices/{deviceId}/live` | **Canonical power primitive** (used by power switch) |
+| `update_live_device_zone(device_id, zone_id, on=, temp=)` | `PUT /v1/devices/{deviceId}/live/zones/{zoneId}` | Per-zone power/temp |
+| `device_action(device_id, action, value=)` | `POST /v1/devices/{deviceId}/action` | quiet_mode/reboot/etc. — NOT for power |
+| `activate_device(device_id, model)` | `POST /v1/devices/{deviceId}/activate` | Pair device |
+| `deactivate_device(device_id)` | `POST /v1/devices/{deviceId}/deactivate` | Unpair device |
+| `trigger_firmware_update(device_id)` | `POST /v1/devices/{deviceId}/update` | Firmware update |
 | `update_schedule_temperature(day, field, celsius)` | `PUT /v1/sleep-schedules` | Partial updates verified |
 | `update_sleep_schedule(schedule_data, action)` | `PUT /v1/sleep-schedules` | **Unverified** for enable/disable action |
 
