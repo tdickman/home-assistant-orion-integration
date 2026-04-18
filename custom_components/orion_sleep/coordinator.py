@@ -268,6 +268,39 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         await self._ws_manager.async_stop()
         await super().async_shutdown()
 
+    def is_user_away(self, device_id: str) -> bool | None:
+        """Check whether the user is currently marked away on the device.
+
+        The server signals away-mode by nulling out ``zones[*].user`` on
+        the device returned from ``GET /v1/devices``; when the user is
+        present each zone carries a populated ``user`` object. Verified
+        by toggling ``POST /v1/sleep-configurations/user-away`` and
+        re-fetching the device list.
+
+        This is **distinct from device power state** (``is_device_on``).
+        The mattress can be powered off while the user is still present
+        (e.g. outside the schedule window), so deriving away-mode from
+        the power state produces a desynced switch and makes
+        ``set_user_away(is_away=False)`` fail with
+        ``400 "User has no previous device to return to"`` when the user
+        was already present.
+        """
+        for device in self.devices:
+            if device.get("id") != device_id:
+                continue
+            zones = device.get("zones") or []
+            if not zones:
+                return None
+            # User is present if any zone has a user object attached; away
+            # only if every zone's user is null. The app treats a partial
+            # state as "present" (safer default — avoids a 400 from the
+            # user-away endpoint).
+            for zone in zones:
+                if zone.get("user"):
+                    return False
+            return True
+        return None
+
     def is_device_on(self, device_id: str) -> bool | None:
         """Check if the device is on.
 

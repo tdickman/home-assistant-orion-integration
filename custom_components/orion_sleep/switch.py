@@ -104,9 +104,15 @@ class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):
     When away mode is OFF, the user is marked as present and the device
     resumes normal operation.
 
-    This is the inverse of the Power switch: Away ON = Power OFF, and
-    Away OFF = Power ON. Both are provided so the user can choose the
-    mental model that fits their automations best.
+    Away mode is **distinct from the Power switch**. The mattress can be
+    powered off without the user being marked away (e.g. the schedule's
+    turn_off action just ran), so this switch reads the authoritative
+    signal from ``zones[*].user`` on ``/v1/devices`` — null across all
+    zones means away, populated means present. Deriving away from
+    ``is_device_on`` would desync the switch and cause
+    ``POST /v1/sleep-configurations/user-away`` to return
+    ``400 "User has no previous device to return to"`` when a click
+    results in a no-op toggle.
     """
 
     _attr_translation_key = "away_mode"
@@ -122,27 +128,43 @@ class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool | None:
-        """Return True if the user is away (device is off)."""
-        device_on = self.coordinator.is_device_on(self._device_id)
-        if device_on is None:
-            return None
-        return not device_on
+        """Return True if the user is currently marked away."""
+        return self.coordinator.is_user_away(self._device_id)
+
+    async def _set_away(self, is_away: bool) -> None:
+        """Call set_user_away, tolerating the no-op 400 from the server.
+
+        The Orion API returns ``400 "User has no previous device to
+        return to"`` when called with ``is_away=False`` on a user who's
+        already present. Swallow that specific error so a redundant
+        toggle (e.g. after an automation re-asserts state) isn't a hard
+        failure in the HA UI.
+        """
+        from .api import OrionApiError
+
+        try:
+            await self.coordinator.api_client.set_user_away(
+                user_id=self.coordinator.user_id,
+                is_away=is_away,
+            )
+        except OrionApiError as err:
+            message = str(err)
+            if "has no previous device to return to" in message:
+                _LOGGER.debug(
+                    "set_user_away(%s) was a no-op; server state already matched",
+                    is_away,
+                )
+            else:
+                raise
+        await self.coordinator.async_request_refresh()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable away mode (mark user as away, device stops)."""
-        await self.coordinator.api_client.set_user_away(
-            user_id=self.coordinator.user_id,
-            is_away=True,
-        )
-        await self.coordinator.async_request_refresh()
+        await self._set_away(True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable away mode (mark user as present, device resumes)."""
-        await self.coordinator.api_client.set_user_away(
-            user_id=self.coordinator.user_id,
-            is_away=False,
-        )
-        await self.coordinator.async_request_refresh()
+        await self._set_away(False)
 
 
 class OrionScheduleSwitch(OrionBaseEntity, SwitchEntity):

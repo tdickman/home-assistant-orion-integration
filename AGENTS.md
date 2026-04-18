@@ -192,7 +192,7 @@ Entities read from coordinator:
 | Sensor (diag) | Live Connection | `_websocket_state` | WS connection state (`connecting`/`connected`/`reconnecting`/`device_offline`/`auth_failed`/`stopped`) plus `seconds_since_last_message` extra attr |
 | Binary Sensor | Sleep Session Active | `_session_active` | `session.is_in_progress` (shows "Asleep" / "Not asleep") |
 | Switch | Power | `_power` | On = all zones on, Off = all zones off. Uses `PUT /v1/devices/{id}/live` (canonical power primitive). State read from each zone's `on`/`is_on` field. |
-| Switch | Away Mode | `_away_mode` | On = user away (presence override also powers device down), Off = user present. Uses `set_user_away` API. |
+| Switch | Away Mode | `_away_mode` | On = user marked away, Off = user present. State read from `zones[*].user` (null across all zones = away). `POST /v1/sleep-configurations/user-away`. Returns `400 "User has no previous device to return to"` on no-op toggle — swallowed in the switch. |
 | Switch | Sleep Schedule | `_sleep_schedule` | `today_sleep_schedule.bedtime_is_active`. Toggle via `update_sleep_schedule`. |
 
 **Per device: 1 climate + 18 sensors + 1 binary sensor + 3 switches = 23 entities**
