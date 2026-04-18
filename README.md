@@ -6,8 +6,8 @@ Custom [Home Assistant](https://www.home-assistant.io/) integration for the **Or
 
 ## Features
 
-- **Live WebSocket stream** — Temperature, power, and sensor readings update within ~2 seconds of the bed or the Orion app changing anything; no need to wait for the next poll.
-- **Bed occupancy** — Per-topper-sensor binary sensors flip within ~2 s of someone sitting on or leaving the bed.
+- **Live WebSocket stream** — Temperature, power, and sensor readings update in realtime when the bed or the Orion app changes anything; no need to wait for the next poll.
+- **Bed occupancy** — Per-topper-sensor binary sensors track who is on the bed. Latency varies; expect ~30 s to 1 minute after sitting down or leaving before the sensor flips (the topper itself is slow to decide).
 - **Live heart rate and breath rate** — Per-sensor realtime readings from the topper (distinct from the post-session averages).
 - **Climate control** — Target bed temperature per-zone, with the current measured temperature pulled from the latest session.
 - **Power and presence switches** — One-click power via the canonical `/v1/devices/{serial}/live` endpoint, plus an Away Mode switch that reads the authoritative presence signal from `zones[*].user`.
@@ -68,9 +68,9 @@ Go to **Settings > Devices & Services > Orion Sleep > Configure** to change thes
 
 In addition to the REST poll, the integration opens one WebSocket per device to `wss://live.api1.orionbed.com/device/<serial_number>` and merges every `live_device.snapshot` / `live_device.update` frame into the coordinator state. This means:
 
-- The Power switch and Bed Climate reflect app-side changes within ~2 s.
+- The Power switch and Bed Climate reflect app-side changes in realtime.
 - Per-sensor vitals (heart rate, breath rate) update continuously while occupied.
-- Occupancy binary sensors flip within ~2 s of a real bed event.
+- Occupancy binary sensors follow the topper's own classification, which can take ~30 s to 1 minute to decide someone has sat down or left. The underlying vitals still update in realtime.
 - The integration will gracefully reconnect with exponential backoff if the stream drops, and automatically refresh the JWT before reconnecting on 401.
 
 The live connection is fully automatic — there is no option to disable it today. Its health is exposed by the **Live Connection** diagnostic sensor per device.
@@ -153,8 +153,8 @@ The raw `status_text`, `is_working`, `firmware_version`, and `hardware_version` 
 | Entity | Device class | Description |
 |---|---|---|
 | Sleep Session | — | `insights.session.is_in_progress`. Rendered as "Asleep" / "Not asleep". |
-| Sensor 1 On Bed | Occupancy | `sensor1.status_text != "left_bed"` — flips within ~2 s via the WebSocket. |
-| Sensor 2 On Bed | Occupancy | `sensor2.status_text != "left_bed"` — flips within ~2 s via the WebSocket. |
+| Sensor 1 On Bed | Occupancy | `sensor1.status_text != "left_bed"`. Driven by the topper's own classification, which can take ~30 s to 1 minute to react to someone sitting down or leaving. |
+| Sensor 2 On Bed | Occupancy | `sensor2.status_text != "left_bed"`. Same latency caveat as sensor 1. |
 
 ## Troubleshooting
 

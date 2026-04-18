@@ -83,8 +83,13 @@ class OrionSensorOnBedBinarySensor(OrionBaseEntity, BinarySensorEntity):
 
     Drives off the WebSocket ``status.sensors.<sensor_name>.status_text``
     field: ``"left_bed"`` means empty, any other value (observed:
-    ``"normal"``) means the sensor detects a person. Flips within ~2 s of
-    a real bed event since updates arrive on every WS heartbeat.
+    ``"normal"``) means the sensor detects a person.
+
+    The WS frames themselves arrive in realtime, but the topper's own
+    classification of on-bed vs. left-bed is slow: observed latency is
+    roughly 30 s to 1 minute after sitting down or getting up before
+    ``status_text`` transitions. Heart-rate/breath-rate updates are
+    faster since those come straight off the sensor.
 
     The two sensors (``sensor1`` / ``sensor2``) correspond to the two
     measurement pads in the topper. Their mapping to ``zone_a`` /

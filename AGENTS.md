@@ -199,7 +199,7 @@ Entities read from coordinator:
 | Sensor | Sensor 1/2 Breath Rate | `_sensorN_live_breath_rate` | WS `status.sensors.sensorN.breath_rate` (br/min). Same sentinel handling. |
 | Sensor (diag) | Sensor 1/2 Status | `_sensorN_sensor_status` | Raw `status_text`: observed `left_bed` (empty) and `normal` (occupied). |
 | Binary Sensor | Sleep Session Active | `_session_active` | `session.is_in_progress` (shows "Asleep" / "Not asleep") |
-| Binary Sensor | Sensor 1/2 On Bed | `_sensorN_on_bed` | Occupancy device class. `status_text != "left_bed"`. Flips within ~2s via WS push. |
+| Binary Sensor | Sensor 1/2 On Bed | `_sensorN_on_bed` | Occupancy device class. `status_text != "left_bed"`. The WS push itself is realtime, but the topper takes ~30s–1min to decide someone has sat down or left, so `status_text` transitions lag the real event. |
 | Switch | Power | `_power` | On = all zones on, Off = all zones off. Uses `PUT /v1/devices/{id}/live` (canonical power primitive). State read from each zone's `on`/`is_on` field. |
 | Switch | Away Mode | `_away_mode` | On = user marked away, Off = user present. State read from `zones[*].user` (null across all zones = away). `POST /v1/sleep-configurations/user-away`. Returns `400 "User has no previous device to return to"` on no-op toggle — swallowed in the switch. |
 | Switch | Sleep Schedule | `_sleep_schedule` | `today_sleep_schedule.bedtime_is_active`. Toggle via `update_sleep_schedule`. |

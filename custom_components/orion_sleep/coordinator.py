@@ -51,7 +51,11 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         # GET /v1/devices/{serial}/live on each poll AND from
         # live_device.{snapshot,update} frames on the per-device WebSocket.
         # The WS stream supersedes the polled state between polls, giving
-        # zone on/temp + status updates within ~2s of the REST mutation.
+        # realtime zone on/temp + status updates without waiting for the
+        # next REST poll. Note that biometric-derived fields like
+        # status.sensors.*.status_text (on-bed classification) lag the
+        # real event by ~30s–1min because the topper itself is slow to
+        # decide; the WS frame arrival is not the bottleneck there.
         self.live_devices: dict[str, dict] = {}
         self.user: dict = {}
         self.user_id: str = ""
