@@ -7,12 +7,16 @@ info:
 
     The app is built with React Native (Expo) and uses Axios as the HTTP client.
     API calls are debounced for real-time features (e.g. temperature control).
-    A WebSocket connection at `wss://live.api1.orionbed.com` is used for live
-    zone data (configured via EXPO_PUBLIC_LIVE_WS_URL). The WebSocket protocol
-    is documented under the `GET /ws` path and the `x-websocket` extension.
+    A WebSocket connection at `wss://live.api1.orionbed.com/device/{serial_number}`
+    is used for live zone data (configured via EXPO_PUBLIC_LIVE_WS_URL). The
+    WebSocket protocol is documented under the `GET /device/{serial_number}`
+    path and the `x-websocket` extension.
 
-    **Note:** Request/response schemas are inferred from decompiled Hermes bytecode
-    string tables. Field names and types are best-effort approximations.
+    **Schema note:** REST request/response shapes are validated against live
+    responses where practical. The WebSocket protocol has been validated by
+    opening a live connection and logging every frame while driving REST
+    mutations (see `orion_info.py --ws-scenario`). Fields that have NOT been
+    observed on the wire are flagged as speculative in their descriptions.
   version: 1.0.0
   contact:
     name: Orion Longevity
@@ -22,7 +26,10 @@ servers:
   - url: https://api1.orionbed.com
     description: Production REST API
   - url: wss://live.api1.orionbed.com
-    description: Production WebSocket (live device data)
+    description: |
+      Production WebSocket (live device data). The full connection URL is
+      `wss://live.api1.orionbed.com/device/{serial_number}?token={JWT}` —
+      one connection per device.
 
 security:
   - bearerAuth: []
@@ -412,7 +419,10 @@ paths:
                     - { id: "zone_b", on: false }
       responses:
         "200":
-          description: Zones updated — a `live_device.snapshot` will be pushed over the WebSocket reflecting the new state.
+          description: |
+            Zones updated. A `live_device.update` message is pushed over any
+            open `/device/{serial_number}` WebSocket within ~2s, carrying the
+            new `zones[*].on`/`temp` setpoints.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -465,7 +475,10 @@ paths:
                 value: { on: true, temp: 22.0 }
       responses:
         "200":
-          description: Zone updated — a `live_device.snapshot` will be pushed over the WebSocket reflecting the new state.
+          description: |
+            Zone updated. A `live_device.update` message is pushed over any
+            open `/device/{serial_number}` WebSocket within ~2s, carrying the
+            new `zones[*].on`/`temp` setpoints.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1224,37 +1237,46 @@ paths:
   #
   # OpenAPI 3.1 does not natively describe WebSocket protocols.
   # The specification below is documented under x-websocket and
-  # as a placeholder GET /ws path for tooling compatibility.
+  # as a placeholder path for tooling compatibility.
+  #
+  # This section was validated against the live server by opening a
+  # /device/<serial_number> WebSocket and driving REST mutations while
+  # logging every frame (see orion_info.py --ws-scenario).  Field shapes
+  # below reflect what is actually pushed on the wire.
 
-  /ws:
+  /device/{serial_number}:
     get:
       operationId: connectLiveWebSocket
       summary: Live device data (WebSocket)
       description: |
         **Protocol:** WebSocket (`wss://`)
-        **Server:** `wss://live.api1.orionbed.com`
+        **Full URL:** `wss://live.api1.orionbed.com/device/{serial_number}?token={JWT}`
 
-        Establishes a persistent WebSocket connection for real-time device
-        zone updates (temperature, device status, session state). The app
-        wraps this in a `DeviceWebSocketProvider` React context and exposes
-        it via a `useDeviceWebSocket` hook.
+        Establishes a persistent WebSocket connection for real-time data on a
+        single device (identified by its serial_number, NOT its UUID). The app
+        wraps this in a `DeviceWebSocketProvider` React context and exposes it
+        via a `useDeviceWebSocket` hook. One connection is opened per device.
 
-        This is a standard WebSocket (RFC 6455) — not Phoenix Channels,
-        Socket.IO, or Ably. The native transport is React Native's
-        `WebSocketModule` backed by OkHttp.
+        Standard RFC 6455 WebSocket — not Phoenix Channels, Socket.IO, or Ably.
+        The native transport is React Native's `WebSocketModule` backed by OkHttp.
 
         ---
 
         ### Connection
 
         ```
-        wss://live.api1.orionbed.com?token=<JWT>
+        wss://live.api1.orionbed.com/device/{serial_number}?token=<JWT>
         ```
 
-        The JWT access token (obtained from `POST /v1/auth/do` or
-        `POST /v1/auth/refresh`) is passed as a `token` query parameter.
-        The server validates the token and associates the connection with
-        the authenticated user's devices.
+        - The path segment is the device's **`serial_number`** (e.g.
+          `54F82A13AF5C`), not its UUID. Using the UUID returns
+          `404 {"error":"Not Found","message":"Device not found"}`.
+        - The JWT access token from `POST /v1/auth/verify` or
+          `POST /v1/auth/refresh` is passed as the `token` query parameter.
+        - Cloudflare fronts the server and negotiates HTTP/2 by default,
+          which breaks the WebSocket Upgrade handshake. Clients must force
+          ALPN to `http/1.1` on the SSL context.
+        - Working User-Agent: `okhttp/4.12.0` (what the Android app sends).
 
         If `EXPO_PUBLIC_LIVE_WS_URL` is not configured, the app logs
         `[WebSocket] EXPO_PUBLIC_LIVE_WS_URL is not configured` and does
@@ -1262,9 +1284,17 @@ paths:
 
         ---
 
-        ### App Lifecycle
+        ### Handshake
 
-        The connection is tied to the app's foreground/background state:
+        **There is NO application-level subscribe/unsubscribe handshake.**
+        As soon as the WebSocket is established the server pushes a
+        `live_device.snapshot` message, followed by `live_device.update`
+        messages for every state change and an additional `live_device.update`
+        approximately every 2 seconds as a heartbeat/freshness push.
+
+        ---
+
+        ### App Lifecycle
 
         | App State Change | Behavior |
         |---|---|
@@ -1272,165 +1302,118 @@ paths:
         | App enters background | Closes connection (code `1001`) |
         | App already in background | Skips connection/reconnection attempts |
 
-        Log messages:
-        - `[WebSocket] App state changed: <state>`
-        - `[WebSocket] Skipping connection - app is not active`
-        - `[WebSocket] Closed connection - app went to background`
-
         ---
 
         ### Authentication Errors & Token Refresh
 
-        When the server returns an auth error, the client:
+        When the server rejects the Upgrade with 401, the client:
 
-        1. Detects the error: `[WebSocket] Auth error detected, attempting token refresh...`
-        2. Calls `POST /v1/auth/refresh` to obtain a new JWT
-        3. On success: `[WebSocket] Token refresh successful, will reconnect with new token`
-        4. Reconnects with the new token as `?token=<newJWT>`
-        5. On failure: `[WebSocket] Token refresh failed, session may be expired:`
+        1. Calls `POST /v1/auth/refresh` to obtain a new JWT.
+        2. Reconnects with the new token as `?token=<newJWT>`.
+        3. On refresh failure, surfaces the expired session.
 
         ---
 
         ### Reconnection
 
-        On unexpected disconnection the client reconnects with backoff:
+        On unexpected disconnection the client reconnects with exponential
+        backoff. The Android app exposes a `connectionState` enum:
 
-        - `[WebSocket] Connection error occurred, onclose will handle reconnection`
-        - `[WebSocket] Reconnecting in <delay>`
-        - Reconnection is cancelled if the app moves to background:
-          `[WebSocket] Cancelled reconnection attempts - app went to background`
-
-        The UI reflects connection state via `connectionState`:
-        - `connectionState.connecting` — connection in progress
-        - `connectionState.connected` — connected and receiving data
-        - `connectionState.reconnecting` — reconnecting after drop
-        - `connectionState.deviceOffline` — device is not reachable
-
-        ---
-
-        ### Topic Subscription
-
-        After connecting, the client subscribes to a topic for the active device:
-
-        ```
-        live/zones/actionState
-        ```
-
-        Subscription is managed via `subscribeToTopic()`. The topic delivers
-        real-time zone action state updates for the user's device(s).
+        - `connecting` — connection in progress
+        - `connected` — connected and receiving data
+        - `reconnecting` — reconnecting after drop
+        - `deviceOffline` — device is not reachable (`status.online=false`)
 
         ---
 
         ### Message Format
 
-        Messages are **JSON text** (not binary). The native `WebSocketModule`
-        delivers them as `{type: "text", data: "<json>"}` events.
+        Messages are **JSON text** (not binary). Every server-to-client
+        message uses the envelope:
 
-        On parse failure: `[WebSocket] Failed to parse message:`
-        On missing fields: `[WebSocket] Invalid message payload-missing`
+        ```json
+        { "type": "<event_type>", "payload": { ... } }
+        ```
+
+        Observed event types (exhaustive as of the latest capture):
+
+        | `type` | Trigger | Notes |
+        |---|---|---|
+        | `live_device.snapshot` | Sent once immediately after connect | Full current state |
+        | `live_device.update` | REST mutations + ~2s heartbeat | Same payload shape as snapshot; may include a `timeline` array of today's scheduled actions |
+
+        No client-to-server messages are required or observed.
 
         ---
 
-        ### Server → Client Messages
+        ### Server → Client Payload
 
-        The server pushes real-time updates for the subscribed device.
-        Message schemas are inferred from string table analysis and are
-        best-effort approximations.
+        Both `live_device.snapshot` and `live_device.update` share the same
+        payload shape. See `#/components/schemas/WsLiveDevicePayload`.
 
-        #### Zone Action State Update
+        Summarized:
 
-        Pushed when zone state changes (temperature adjustment, device
-        on/off, heating/cooling status):
-
-        ```json
+        ```jsonc
         {
-          "topic": "live/zones/actionState",
-          "event": "update",
-          "data": {
-            "deviceId": "string",
-            "zones": [
-              {
-                "side": "left | right",
-                "currentTemp": 72.0,
-                "targetTemperature": 68.0,
-                "isOn": true,
-                "isAway": false,
-                "temperatureStatus": "heating | cooling | holding | off"
-              }
+          "type": "live_device.snapshot",        // or "live_device.update"
+          "payload": {
+            "serial_number": "54F82A13AF5C",
+            "model": "OSCT001-1",
+            "zones": [                           // setpoints (user intent)
+              { "id": "zone_a", "temp": 20.5, "on": false },
+              { "id": "zone_b", "temp": 20.5, "on": false }
             ],
-            "splitZones": true,
-            "deviceStatus": "online | offline | error | firmwareUpdate"
+            "led_brightness": 0,
+            "water_fill": "unknown",
+            "is_in_water_fill_mode": false,
+            "status": {                          // measured state
+              "online": true,
+              "firmware": { "cb": "2.6.0", "ib": "2.5.0" },
+              "firmware_update": { "in_progress": false, "current_step": "complete", ... },
+              "pending_update": { "is_available": false },
+              "network": { "last_seen": 1776478546, "name": "...", "ip": "...", "rssi": -58, "uptime": 266238, "mac": "..." },
+              "safety": { "error": false, "error_codes": [], "error_descriptions": [] },
+              "zones": [                         // measured temperatures
+                { "id": "zone_a", "temp": 21.9, "thermal_state": "standby" }
+              ],
+              "sensors": {
+                "sensor1": { "heart_rate": 0, "breath_rate": 0, "status": 5, "status_text": "left_bed", "sign_of_asleep": 1, "sign_of_wake_up": 1, "timestamp": 1674759920, "uptime": 498561, "is_working": true, "firmware_version": "11.00.04", "hardware_version": "01.00.00" },
+                "sensor2": { ... }
+              }
+            },
+            "timeline": [                        // only on update; today's scheduled actions
+              { "id": "...-bedtime-...", "user_id": "...", "label": "bedtime",  "scheduled_time": "2026-04-18T03:55:00.000Z", "action": { "zones": [{"id": "zone_a", "temp": 23, "on": true}, ...] }, "created_at": "..." },
+              { "label": "phase_1", ... }, { "label": "phase_2", ... }, { "label": "wake_up", ... }, { "label": "turn_off", ... }
+            ]
           }
         }
         ```
 
-        #### Device Status Update
+        Note that `payload.zones[*]` carries the user setpoint (the target
+        temp and power state), while `payload.status.zones[*]` carries the
+        measured temperature and the current thermal state
+        (`standby`/`heating`/`cooling` — value set inferred, only `standby`
+        observed in capture).
 
-        Pushed when device connectivity or status changes:
+        The `timeline` field was empty in idle captures but populated during
+        updates that followed REST mutations, carrying today's
+        bedtime/phase_1/phase_2/wake_up/turn_off actions from
+        `GET /v1/sleep-schedules`.
 
-        ```json
-        {
-          "topic": "live/zones/actionState",
-          "event": "deviceStatus",
-          "data": {
-            "deviceId": "string",
-            "status": "DEVICE_OFFLINE | DEVICE_ERROR | DEVICE_QUIET_MODE",
-            "firmwareUpdateInProgress": false,
-            "needsFirmwareUpdate": false,
-            "waterLevelLow": false
-          }
-        }
-        ```
-
-        #### Session State Update
-
-        Pushed when a sleep session starts or ends:
-
-        ```json
-        {
-          "topic": "live/zones/actionState",
-          "event": "sessionState",
-          "data": {
-            "active": true,
-            "sessionId": "string",
-            "startedAt": "2025-01-15T22:30:00Z"
-          }
-        }
-        ```
-
-        ---
-
-        ### Client → Server Messages
-
-        The client sends subscription management messages. Exact format
-        is inferred:
-
-        #### Subscribe
-
-        ```json
-        {
-          "action": "subscribe",
-          "topic": "live/zones/actionState",
-          "deviceId": "string"
-        }
-        ```
-
-        #### Unsubscribe
-
-        ```json
-        {
-          "action": "unsubscribe",
-          "topic": "live/zones/actionState"
-        }
-        ```
+        Events NOT observed in the latest capture (may exist but were not
+        triggered): explicit session-start/session-end events, device-offline
+        events (device was online throughout), quiet_mode/reboot responses,
+        firmware-update-in-progress events, water-fill-mode transitions.
 
         ---
 
         ### Keepalive
 
-        The WebSocket uses standard protocol-level ping/pong frames
-        (handled by OkHttp). A `pingInterval` is configured on the
-        client. No application-level heartbeat messages were identified.
+        Uses protocol-level WebSocket ping/pong frames. The Android app
+        relies on OkHttp's built-in `pingInterval`. No application-level
+        heartbeat messages are required from the client, but the server
+        itself pushes a `live_device.update` about every 2 seconds which
+        effectively keeps the stream warm.
 
         ---
 
@@ -1439,7 +1422,7 @@ paths:
         | Code | Meaning |
         |---|---|
         | `1000` | Normal closure |
-        | `1001` | App going to background / shutdown |
+        | `1001` | Client shutdown (app to background, HA unload) |
         | `1006` | Abnormal closure (no close frame) |
 
         ---
@@ -1448,27 +1431,23 @@ paths:
 
         | Endpoint | Relationship |
         |---|---|
-        | `POST /v1/auth/do` | Obtain initial JWT for `?token=` |
+        | `POST /v1/auth/verify` | Obtain initial JWT for `?token=` |
         | `POST /v1/auth/refresh` | Refresh JWT before reconnection |
-        | `GET /v1/session-state` | HTTP fallback for session state |
-        | `PUT /v1/sleep-configurations/temperature` | HTTP-based temperature control (debounced) |
-        | `GET /v1/sleep-configurations/devices` | Initial device/zone config load |
-
-        ---
-
-        ### State Management
-
-        WebSocket data feeds into Zustand stores:
-        - `@orion_devices` — device online/offline state, status
-        - `@orion_sleep_configurations` — zone temperatures, split zone config
-
-        The `ActionState` / `actionStateReducer` processes incoming
-        WebSocket messages and dispatches `ActionEffect` side effects
-        (e.g. UI updates, debounced API calls via `_executeDebouncedApiCall`).
+        | `PUT /v1/devices/{serial_number}/live` | Setpoint mutation — triggers `live_device.update` |
+        | `PUT /v1/devices/{serial_number}/live/zones/{zone_id}` | Single-zone setpoint — triggers `live_device.update` |
+        | `POST /v1/sleep-configurations/user-away` | Presence override — also triggers `live_device.update` |
+        | `GET /v1/devices/{serial_number}/live` | HTTP-polled equivalent of the snapshot payload |
 
       tags: [WebSocket]
       security: []
       parameters:
+        - name: serial_number
+          in: path
+          required: true
+          description: Device serial_number (NOT its UUID `id`)
+          schema:
+            type: string
+            example: 54F82A13AF5C
         - name: token
           in: query
           required: true
@@ -1489,6 +1468,8 @@ paths:
               schema:
                 type: string
                 example: Upgrade
+        "400":
+          description: Missing serial_number path segment
         "401":
           description: Invalid or expired token
           content:
@@ -1500,90 +1481,72 @@ paths:
                     type: string
                   message:
                     type: string
+        "404":
+          description: |
+            Unknown serial_number. Response body:
+            `{"error": "Not Found", "message": "Device not found"}`. Make sure
+            the path is the device's `serial_number`, not its UUID `id`.
 
 # ────────────────────────────────────────────────────────────────
 #  x-websocket: Machine-readable WebSocket protocol specification
 # ────────────────────────────────────────────────────────────────
 x-websocket:
-  url: wss://live.api1.orionbed.com
+  urlTemplate: wss://live.api1.orionbed.com/device/{serial_number}?token={JWT}
   description: |
-    Live device zone data. Reverse-engineered from Hermes bytecode
-    string tables — field names and message structure are best-effort.
+    Live device data stream, one connection per device (keyed by
+    serial_number, NOT the UUID id). Validated against the live server
+    with orion_info.py --ws-scenario.
   authentication:
     type: query
     parameter: token
     format: JWT
     description: |
-      The JWT access token from /v1/auth/do is appended as ?token=<jwt>.
-      On auth errors the client refreshes via /v1/auth/refresh and reconnects.
+      The JWT access token from /v1/auth/verify is appended as ?token=<jwt>.
+      On 401 Upgrade the client calls /v1/auth/refresh and reconnects with
+      the new token.
+  transportNotes:
+    alpn: http/1.1   # Cloudflare would negotiate h2 otherwise, which breaks the WS upgrade
+    userAgent: okhttp/4.12.0
+    messageFormat: json-text
+    handshake: none  # server pushes live_device.snapshot immediately on connect
+    heartbeat:
+      wireLevel: rfc6455 ping/pong
+      applicationLevel: |
+        Server pushes an additional `live_device.update` approximately every
+        2 seconds as an idle refresh — no client-side ping is required.
 
-  topics:
-    live/zones/actionState:
+  events:
+    live_device.snapshot:
+      direction: server->client
+      cardinality: once-per-connection
       description: |
-        Real-time zone action state for the authenticated user's device(s).
-        Carries temperature readings, device status, and session state.
-      subscribe:
-        description: Client subscribes after connection is established
-        message:
-          type: object
-          properties:
-            action:
-              type: string
-              const: subscribe
-            topic:
-              type: string
-              const: live/zones/actionState
-            deviceId:
-              type: string
-      unsubscribe:
-        message:
-          type: object
-          properties:
-            action:
-              type: string
-              const: unsubscribe
-            topic:
-              type: string
-              const: live/zones/actionState
-
-      serverMessages:
-        zoneActionStateUpdate:
-          description: Pushed when zone temperature or device power state changes
+        Pushed immediately after the WebSocket upgrade completes. Full
+        snapshot of the device's setpoints and measured state.
+      envelope:
+        type: object
+        properties:
+          type:
+            const: live_device.snapshot
           payload:
-            type: object
-            properties:
-              topic:
-                type: string
-              event:
-                type: string
-              data:
-                $ref: "#/components/schemas/WsZoneActionState"
+            $ref: "#/components/schemas/WsLiveDevicePayload"
 
-        deviceStatusUpdate:
-          description: Pushed on device connectivity or status change
+    live_device.update:
+      direction: server->client
+      cardinality: many
+      description: |
+        Pushed on any state change (REST mutation to /v1/devices/{serial}/live,
+        /live/zones/{zone}, or /v1/sleep-configurations/user-away) AND
+        approximately every 2 seconds as an idle refresh. Same payload shape
+        as the snapshot. May additionally include a `timeline` array of
+        today's scheduled actions (bedtime/phase_1/phase_2/wake_up/turn_off)
+        derived from /v1/sleep-schedules.
+      envelope:
+        type: object
+        properties:
+          type:
+            const: live_device.update
           payload:
-            type: object
-            properties:
-              topic:
-                type: string
-              event:
-                type: string
-                const: deviceStatus
-              data:
-                $ref: "#/components/schemas/WsDeviceStatus"
-
-        sessionStateUpdate:
-          description: Pushed when a sleep session starts or ends
-          payload:
-            type: object
-            properties:
-              topic:
-                type: string
-              event:
-                type: string
-                const: sessionState
-              data:
-                $ref: "#/components/schemas/WsSessionState"
+            $ref: "#/components/schemas/WsLiveDevicePayload"
 
   connectionLifecycle:
     connectOnForeground: true
@@ -1591,7 +1554,7 @@ x-websocket:
     backgroundCloseCode: 1001
     reconnect:
       enabled: true
-      strategy: backoff
+      strategy: exponential-backoff
       tokenRefreshBeforeReconnect: true
     pingPong: protocol-level
 
@@ -1983,138 +1946,279 @@ components:
     # ──────────────────────────────────────────────
     #  WebSocket Schemas
     # ──────────────────────────────────────────────
-
-    WsZoneActionState:
-      type: object
-      description: |
-        Real-time zone state pushed over WebSocket. Contains current
-        temperature, target temperature, and power/heating status for
-        each zone on the device. Inferred from Hermes string table —
-        field names are best-effort.
-      properties:
-        deviceId:
-          type: string
-          description: Hardware device identifier
-        zones:
-          type: array
-          description: One entry per zone (one if unified, two if split)
-          items:
-            $ref: "#/components/schemas/WsZone"
-        splitZones:
-          type: boolean
-          description: Whether the device has independent left/right zones
-        deviceStatus:
-          type: string
-          description: Current device connectivity/operational status
-          enum: [online, offline, error, firmwareUpdate]
-
-    WsZone:
-      type: object
-      description: |
-        A single temperature zone on the device. Corresponds to one
-        side of the bed when zones are split.
-      properties:
-        side:
-          type: string
-          enum: [left, right]
-          description: Bed side this zone controls
-        currentTemp:
-          type: number
-          format: float
-          description: Current measured temperature of the zone
-        targetTemperature:
-          type: number
-          format: float
-          description: Target temperature set by the user
-        isOn:
-          type: boolean
-          description: Whether this zone is actively heating/cooling
-        isAway:
-          type: boolean
-          description: Whether the user assigned to this zone is marked away
-        temperatureStatus:
-          type: string
-          description: Current heating/cooling state
-          enum: [heating, cooling, holding, off]
-
-    WsDeviceStatus:
-      type: object
-      description: |
-        Device status update pushed when connectivity or operational
-        state changes. String constants from DEVICE_* enum in the app.
-      properties:
-        deviceId:
-          type: string
-        status:
-          type: string
-          description: Device status constant
-          enum:
-            - DEVICE_OFFLINE
-            - DEVICE_ERROR
-            - DEVICE_QUIET_MODE
-            - DEVICE_DISCONNECTED
-        firmwareUpdateInProgress:
-          type: boolean
-          description: Whether a firmware update is currently being applied
-        needsFirmwareUpdate:
-          type: boolean
-          description: Whether a firmware update is available
-        waterLevelLow:
-          type: boolean
-          description: Whether the device water reservoir needs refilling
-
-    WsSessionState:
-      type: object
-      description: |
-        Sleep session state update pushed when a session starts or ends.
-        Mirrors the data from GET /v1/session-state.
-      properties:
-        active:
-          type: boolean
-          description: Whether a sleep session is currently active
-        sessionId:
-          type: string
-          description: Unique session identifier
-        startedAt:
-          type: string
-          format: date-time
-          description: When the session started (ISO 8601)
-
-    WsClientMessage:
-      type: object
-      description: |
-        Message sent from the client to the server. Used for topic
-        subscription management.
-      properties:
-        action:
-          type: string
-          enum: [subscribe, unsubscribe]
-          description: The action to perform
-        topic:
-          type: string
-          description: Topic path to subscribe/unsubscribe
-          example: live/zones/actionState
-        deviceId:
-          type: string
-          description: Device to subscribe to (required for subscribe)
+    #
+    # These schemas describe frames observed on the wire by
+    # orion_info.py --ws-scenario.  Fields NOT seen in that capture
+    # are flagged as speculative in their descriptions.
 
     WsServerMessage:
       type: object
       description: |
-        Envelope for all server-to-client WebSocket messages.
+        Envelope for every server-to-client WebSocket message.
+        Observed event types: `live_device.snapshot` and `live_device.update`.
+      required: [type, payload]
       properties:
-        topic:
+        type:
           type: string
-          description: The topic this message belongs to
-          example: live/zones/actionState
-        event:
-          type: string
-          description: Event type within the topic
-          enum: [update, deviceStatus, sessionState]
-        data:
-          type: object
+          enum:
+            - live_device.snapshot
+            - live_device.update
           description: |
-            Event payload. Structure depends on event type:
-            - update → WsZoneActionState
-            - deviceStatus → WsDeviceStatus
-            - sessionState → WsSessionState
+            `live_device.snapshot` is pushed once immediately after connect.
+            `live_device.update` is pushed on every state change AND
+            approximately every 2s as an idle refresh.
+        payload:
+          $ref: "#/components/schemas/WsLiveDevicePayload"
+
+    WsLiveDevicePayload:
+      type: object
+      description: |
+        Full state of a single device. Shared between `live_device.snapshot`
+        and `live_device.update`. Mirrors the body returned by
+        `GET /v1/devices/{serial_number}/live`.
+      required: [serial_number, zones, status]
+      properties:
+        serial_number:
+          type: string
+          description: Device serial_number (matches the WS path segment)
+          example: 54F82A13AF5C
+        model:
+          type: string
+          example: OSCT001-1
+        zones:
+          type: array
+          description: |
+            Zone **setpoints** (user intent). The `on` field reflects power
+            state; `temp` is the requested target in Celsius.
+          items:
+            $ref: "#/components/schemas/WsZoneSetpoint"
+        led_brightness:
+          type: integer
+          description: Front-panel LED brightness 0-100.
+          example: 0
+        water_fill:
+          type: string
+          description: |
+            Water reservoir state. Observed values: `unknown`. Other values
+            such as `low`/`ok` are speculative — not captured on a device
+            with a healthy reservoir.
+        is_in_water_fill_mode:
+          type: boolean
+        status:
+          $ref: "#/components/schemas/WsDeviceStatus"
+        timeline:
+          type: array
+          description: |
+            Present on `live_device.update` (may be empty). Today's scheduled
+            actions derived from `GET /v1/sleep-schedules`. Entries are
+            sequential through the day.
+          items:
+            $ref: "#/components/schemas/WsTimelineEntry"
+
+    WsZoneSetpoint:
+      type: object
+      description: |
+        Per-zone setpoint (what the user has asked for). Measured temperature
+        and thermal state are in `status.zones[]` instead.
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: Zone identifier
+          enum: [zone_a, zone_b]
+        temp:
+          type: number
+          format: float
+          description: Target temperature in Celsius
+          example: 20.5
+        "on":
+          type: boolean
+          description: Whether the zone is powered on
+
+    WsDeviceStatus:
+      type: object
+      description: |
+        Measured/runtime state of the device. Distinct from the per-zone
+        setpoints above.
+      properties:
+        online:
+          type: boolean
+          description: |
+            True when the device is currently reachable by the cloud. When
+            false, the Android app surfaces `connectionState.deviceOffline`.
+        firmware:
+          type: object
+          description: Installed firmware versions.
+          properties:
+            cb:
+              type: string
+              description: Control-board firmware version
+              example: "2.6.0"
+            ib:
+              type: string
+              description: Interface-board firmware version
+              example: "2.5.0"
+        firmware_update:
+          type: object
+          description: State of the most recent firmware-update workflow.
+          properties:
+            workflow_id:
+              type: string
+            started_at:
+              type: integer
+              format: int64
+              description: Unix ms
+            updated_at:
+              type: integer
+              format: int64
+            in_progress:
+              type: boolean
+            current_step:
+              type: string
+              description: |
+                Observed value: `complete`. Other lifecycle values
+                (`downloading`, `installing`, …) are speculative.
+            completed_at:
+              type: integer
+              format: int64
+            result:
+              type: string
+              description: Observed value `success`.
+        pending_update:
+          type: object
+          properties:
+            is_available:
+              type: boolean
+        network:
+          type: object
+          description: Wi-Fi / network stats.
+          properties:
+            last_seen:
+              type: integer
+              format: int64
+              description: Unix seconds of last contact
+            name:
+              type: string
+              description: SSID
+            ip:
+              type: string
+            rssi:
+              type: integer
+              description: dBm
+            uptime:
+              type: integer
+              description: Seconds since boot
+            mac:
+              type: string
+        safety:
+          type: object
+          properties:
+            error:
+              type: boolean
+            error_codes:
+              type: array
+              items:
+                type: string
+            error_descriptions:
+              type: array
+              items:
+                type: string
+        zones:
+          type: array
+          description: |
+            Measured per-zone state (distinct from the setpoints at the
+            payload's top level).
+          items:
+            $ref: "#/components/schemas/WsMeasuredZone"
+        sensors:
+          type: object
+          description: Per-sensor biometrics. Keyed by sensor name.
+          additionalProperties:
+            $ref: "#/components/schemas/WsSensor"
+
+    WsMeasuredZone:
+      type: object
+      description: Measured zone temperature and thermal state.
+      properties:
+        id:
+          type: string
+          enum: [zone_a, zone_b]
+        temp:
+          type: number
+          format: float
+          description: Measured zone temperature in Celsius
+        thermal_state:
+          type: string
+          description: |
+            Observed value: `standby`. Other plausible values from the app
+            (`heating`, `cooling`, `holding`) are speculative — the capture
+            did not exercise a live heat/cool cycle.
+
+    WsSensor:
+      type: object
+      description: |
+        A single in-topper sensor. The topper exposes `sensor1` and `sensor2`.
+      properties:
+        heart_rate:
+          type: integer
+          description: BPM; 0 when nobody is on the bed
+        breath_rate:
+          type: integer
+          description: Breaths/min; 0 when nobody is on the bed
+        status:
+          type: integer
+          description: |
+            Numeric status code. Observed `5` with `status_text=left_bed`.
+        status_text:
+          type: string
+          description: |
+            Observed `left_bed`. Other plausible values (`on_bed`, `asleep`,
+            `awake`) are speculative.
+        sign_of_asleep:
+          type: integer
+        sign_of_wake_up:
+          type: integer
+        timestamp:
+          type: integer
+          format: int64
+          description: Unix seconds
+        uptime:
+          type: integer
+          description: Sensor uptime (seconds)
+        is_working:
+          type: boolean
+        firmware_version:
+          type: string
+        hardware_version:
+          type: string
+
+    WsTimelineEntry:
+      type: object
+      description: |
+        A scheduled action for today, materialized from
+        `GET /v1/sleep-schedules` for the active user. Appears only on
+        `live_device.update`.
+      properties:
+        id:
+          type: string
+          description: "Composite id: `{user_id}-{label}-{scheduled_time_ms}`"
+        user_id:
+          type: string
+        label:
+          type: string
+          enum: [bedtime, phase_1, phase_2, wake_up, turn_off]
+        scheduled_time:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC
+        action:
+          type: object
+          description: What will happen at `scheduled_time`.
+          properties:
+            zones:
+              type: array
+              items:
+                $ref: "#/components/schemas/WsZoneSetpoint"
+        created_at:
+          type: string
+          format: date-time

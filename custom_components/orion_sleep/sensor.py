@@ -14,6 +14,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import OrionDataUpdateCoordinator
@@ -350,6 +351,7 @@ async def async_setup_entry(
             )
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
+        entities.append(OrionWebSocketStateSensor(coordinator, device_id))
 
     async_add_entities(entities)
 
@@ -473,3 +475,51 @@ class OrionCurrentTempOffsetSensor(OrionBaseEntity, SensorEntity):
         if values:
             return self._celsius_to_offset(values[-1])
         return None
+
+
+class OrionWebSocketStateSensor(OrionBaseEntity, SensorEntity):
+    """Diagnostic sensor exposing the live-device WebSocket state.
+
+    Mirrors the Android app's ``connectionState`` enum. Useful for
+    automations that should pause when the device is unreachable.
+    """
+
+    _attr_translation_key = "websocket_state"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:lan-connect"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_websocket_state"
+
+    def _serial(self) -> str | None:
+        device = self._get_device()
+        return device.get("serial_number")
+
+    @property
+    def native_value(self) -> str | None:
+        serial = self._serial()
+        if not serial:
+            return None
+        return self.coordinator.ws_state(serial)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        serial = self._serial()
+        if not serial:
+            return None
+        last_at = self.coordinator.ws_last_message_at(serial)
+        if not last_at:
+            return {"seconds_since_last_message": None}
+        import time
+
+        return {"seconds_since_last_message": round(time.monotonic() - last_at, 1)}
+
+    @property
+    def available(self) -> bool:
+        # Always show the state — that's the whole point of this sensor.
+        return True

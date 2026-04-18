@@ -10,8 +10,8 @@ HACS-compatible Home Assistant custom integration for the **Orion Sleep** smart 
 home-assistant-orion-integration/
 ├── hacs.json                          # HACS repo metadata
 ├── README.md                          # User-facing install/usage docs
-├── openapi.yaml                       # OpenAPI 3.1 spec (reverse-engineered, NOT fully accurate)
-├── orion_info.py                      # Working CLI script — ground truth for API behavior
+├── openapi.yaml                       # OpenAPI 3.1 spec (reverse-engineered; WS section validated on-wire)
+├── orion_info.py                      # Working CLI script (REST + WS capture tooling)
 ├── custom_components/
 │   └── orion_sleep/
 │       ├── __init__.py                # async_setup_entry / async_unload_entry
@@ -22,7 +22,8 @@ home-assistant-orion-integration/
 │       ├── config_flow.py             # Three-step auth flow + options flow
 │       ├── entity.py                  # Base entity with DeviceInfo + temp conversion helpers
 │       ├── climate.py                 # Bed temperature control
-│       ├── sensor.py                  # Sleep insight + schedule + offset sensors (17 per device)
+│       ├── sensor.py                  # Sleep insight + schedule + offset + WS state sensors (18 per device)
+│       ├── websocket.py                # Live device WebSocket client (per-device aiohttp)
 │       ├── binary_sensor.py           # Sleep session active
 │       ├── switch.py                  # Power (user-away) + sleep schedule switches
 │       ├── diagnostics.py             # Diagnostics with PII redaction
@@ -32,9 +33,15 @@ home-assistant-orion-integration/
 │       └── brand/                     # Integration icon (96px + 180px)
 ```
 
-## Critical: API Behavior vs OpenAPI Spec
+## Source-of-Truth Policy
 
-The `openapi.yaml` was reverse-engineered from the Android app bytecode. It has significant inaccuracies. **Always trust `orion_info.py` and the notes below over the OpenAPI spec.**
+Both `openapi.yaml` and `orion_info.py` are kept in sync as new endpoints or behaviors are discovered. The REST section of the spec is reverse-engineered from the Android bytecode with spot-checks against the live API; the WebSocket section (`/device/{serial_number}` path and `x-websocket` block) is validated by an on-wire capture (`orion_info.py --ws-scenario`). Neither file is inherently more authoritative — when they disagree, re-verify against the live server rather than trusting one blindly.
+
+Known gaps and unverified endpoints are called out in the tables below. When adding or changing behavior:
+
+1. Prefer running `orion_info.py --ws-scenario` (or the individual flags) against a live account to confirm on-wire shapes.
+2. Update **both** `openapi.yaml` and the relevant comments/flags in `orion_info.py`.
+3. Reflect any new limitations or caveats in this file.
 
 ### API Base URL
 
@@ -138,8 +145,18 @@ coordinator._async_setup() -- fetches user profile + devices (once)
 coordinator._async_update_data() -- polls every N seconds:
   1. ensure_valid_token() (auto-refresh, persists via callback)
   2. list_devices()        --> coordinator.devices (away/present detection)
-  3. get_sleep_schedules() --> data["schedules"]
-  4. get_insights(days=N)  --> data["insights"]
+  3. OrionWebSocketManager.sync_to_serials() (start/stop per-device WS)
+  4. get_live_device(serial) per device (skipped when WS is fresh)
+  5. get_sleep_schedules() --> data["schedules"]
+  6. get_insights(days=N)  --> data["insights"]
+       |
+       v
+Per-device live WebSocket (wss://live.api1.orionbed.com/device/<serial>):
+  - Pushes live_device.snapshot on connect, live_device.update on every
+    state change (+ idle heartbeat every ~2s)
+  - Coordinator._handle_ws_message merges payload into live_devices
+    and calls async_set_updated_data() so entities refresh immediately
+  - Timeline field is stored at data["ws_timelines"][device_id]
        |
        v
 Entities read from coordinator:
@@ -147,6 +164,7 @@ Entities read from coordinator:
   - Sensors: insights sessions + schedule + overview scores
   - Binary sensor: session.is_in_progress
   - Switches: device zones (power + away mode) + schedule.bedtime_is_active
+  - Diagnostic sensor: per-device WS connection state
 ```
 
 ## Entities
@@ -171,12 +189,13 @@ Entities read from coordinator:
 | Sensor | Bedtime Temperature | `_bedtime_temp` | `today_sleep_schedule.bedtime_temp` + phase/smart temp extra attrs |
 | Sensor | Wake-up Temperature | `_wakeup_temp` | `today_sleep_schedule.wakeup_temp` |
 | Sensor | Current Temp Offset | `_current_temp_offset` | Latest session `temperature.values[-1]` converted to app-style offset |
+| Sensor (diag) | Live Connection | `_websocket_state` | WS connection state (`connecting`/`connected`/`reconnecting`/`device_offline`/`auth_failed`/`stopped`) plus `seconds_since_last_message` extra attr |
 | Binary Sensor | Sleep Session Active | `_session_active` | `session.is_in_progress` (shows "Asleep" / "Not asleep") |
 | Switch | Power | `_power` | On = all zones on, Off = all zones off. Uses `PUT /v1/devices/{id}/live` (canonical power primitive). State read from each zone's `on`/`is_on` field. |
 | Switch | Away Mode | `_away_mode` | On = user away (presence override also powers device down), Off = user present. Uses `set_user_away` API. |
 | Switch | Sleep Schedule | `_sleep_schedule` | `today_sleep_schedule.bedtime_is_active`. Toggle via `update_sleep_schedule`. |
 
-**Per device: 1 climate + 17 sensors + 1 binary sensor + 3 switches = 22 entities**
+**Per device: 1 climate + 18 sensors + 1 binary sensor + 3 switches = 23 entities**
 
 ### Sensor Implementation Notes
 
@@ -225,6 +244,77 @@ Tokens cache to `~/.orion_tokens.json`. Use `--relogin` to force fresh auth.
 Additional `orion_info.py` flags:
 - `--insights-days N` — number of days of insights to fetch
 - `--set-away` / `--set-present` — toggle device power, then re-fetch devices/schedules to show changes
+- `--power-on` / `--power-off` — probe `PUT /v1/devices/{ident}/live` against both `id` and `serial_number`
+- `--websocket [--ws-duration N]` — open `/device/<serial>?token=<JWT>` and log every frame for N seconds (default 60)
+- `--ws-scenario` — open the WebSocket and drive a scripted sequence of REST edits (zone on/off, temp low/high, bulk on/off, user-away) while logging frames; restores the original zone state at the end. Use this to re-verify the event taxonomy against the live server.
+
+## WebSocket — Live Device Data
+
+Validated against the live server with `orion_info.py --ws-scenario`.
+
+### Connection
+
+```
+wss://live.api1.orionbed.com/device/<serial_number>?token=<JWT>
+```
+
+- Path uses the device's **`serial_number`**, NOT its UUID `id` (UUID returns 404 `{"error":"Not Found","message":"Device not found"}`).
+- JWT is passed as a `token` query parameter.
+- Cloudflare negotiates HTTP/2 by default which breaks the WS upgrade — the SSL context **must force ALPN to `http/1.1`**.
+- Working User-Agent: `okhttp/4.12.0`.
+- **No client-side handshake**. The server pushes `live_device.snapshot` immediately after the Upgrade completes, then `live_device.update` on state changes and approximately every 2s as an idle refresh.
+- Close code `1001` on clean client shutdown.
+- On 401 during upgrade, refresh via `POST /v1/auth/refresh` and reconnect with the new token.
+
+### Event Taxonomy (exhaustive as of last capture)
+
+| `type` | When | Notes |
+|---|---|---|
+| `live_device.snapshot` | Once, immediately after connect | Full state |
+| `live_device.update` | On every REST mutation to `/v1/devices/{serial}/live[/zones/{zone}]` or `/v1/sleep-configurations/user-away`, plus ~every 2s as an idle refresh | Same payload shape as snapshot; may include a `timeline` array of today's schedule actions |
+
+Both use the envelope `{"type": <event>, "payload": {...}}`. `set_user_away` does **not** emit a distinct event type — it produces another `live_device.update` with zones powered accordingly.
+
+### Payload Shape (shared between snapshot and update)
+
+```text
+payload.serial_number         string
+payload.model                 e.g. "OSCT001-1"
+payload.zones[]               setpoints (user intent): {id, temp (°C), on}
+payload.led_brightness        int 0-100
+payload.water_fill            string (observed "unknown")
+payload.is_in_water_fill_mode bool
+payload.status.online         bool
+payload.status.firmware       {cb, ib}
+payload.status.firmware_update {workflow_id, started_at, updated_at, in_progress,
+                                current_step, completed_at, result}
+payload.status.pending_update {is_available}
+payload.status.network        {last_seen, name, ip, rssi, uptime, mac}
+payload.status.safety         {error, error_codes[], error_descriptions[]}
+payload.status.zones[]        measured: {id, temp (°C), thermal_state}
+payload.status.sensors.sensor1, sensor2
+                              {heart_rate, breath_rate, status, status_text,
+                               sign_of_asleep, sign_of_wake_up, timestamp,
+                               uptime, is_working, firmware_version,
+                               hardware_version}
+payload.timeline[]            only on update; today's scheduled actions:
+                              {id, user_id, label (bedtime|phase_1|phase_2|
+                               wake_up|turn_off), scheduled_time, action:
+                               {zones:[...]}, created_at}
+```
+
+Notable:
+- `payload.zones[].temp` is the **setpoint**. The **measured** zone temperature lives at `payload.status.zones[].temp`.
+- `status.zones[].thermal_state` was only observed as `"standby"`; heating/cooling values are plausible but unobserved.
+- `sensors.sensor*.status_text` was only observed as `"left_bed"`; on-bed/awake/asleep values are plausible but unobserved.
+
+### Events NOT Observed (may exist, were not triggered)
+
+- Distinct session-start / session-end events (likely still only available via `/v2/insights` polling)
+- Device-offline event (device was online throughout the capture)
+- quiet_mode / reboot action responses
+- Firmware-update-in-progress transitions
+- Water-fill-mode transitions
 
 ## Known Issues
 
@@ -236,7 +326,6 @@ Additional `orion_info.py` flags:
 - `set_temperature` endpoint not verified against live API
 - Schedule enable/disable (`PUT /v1/sleep-schedules?action=enable`) not verified
 - `async_set_hvac_mode(OFF)` and `async_turn_off()` on climate entity are no-ops (schedule-based control only)
-- No WebSocket support (WS URL/protocol not documented)
 - No firmware version exposed (not in device response)
 - HRV values frequently null in real data
 - No way to start/stop sleep sessions via API

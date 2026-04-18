@@ -3,6 +3,18 @@
 DOMAIN = "orion_sleep"
 API_BASE_URL = "https://api1.orionbed.com"
 
+# Live device WebSocket. Full URL is built as
+# f"{WS_BASE_URL}/device/{serial_number}?token={jwt}".
+WS_BASE_URL = "wss://live.api1.orionbed.com"
+WS_USER_AGENT = "okhttp/4.12.0"  # what the Android app sends; known-good
+
+# How stale a WS connection is allowed to get before we treat it as dropped
+# (the server pushes a live_device.update at least every ~2s).
+WS_STALE_AFTER_SECONDS = 30.0
+# Exponential reconnect backoff bounds.
+WS_RECONNECT_MIN_DELAY = 1.0
+WS_RECONNECT_MAX_DELAY = 60.0
+
 # Config entry data keys (stored in config_entry.data)
 CONF_AUTH_METHOD = "auth_method"  # "email" or "phone"
 CONF_AUTH_VALUE = "auth_value"  # the email address or phone number

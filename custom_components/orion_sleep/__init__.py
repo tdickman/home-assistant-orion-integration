@@ -74,4 +74,13 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        coordinator: OrionDataUpdateCoordinator | None = getattr(
+            entry, "runtime_data", None
+        )
+        if coordinator is not None:
+            # Close the live-device WebSockets cleanly (code 1001), matching
+            # the Android app's background-shutdown behavior.
+            await coordinator.async_shutdown()
+    return unloaded

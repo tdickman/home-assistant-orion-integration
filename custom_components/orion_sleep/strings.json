@@ -153,6 +153,17 @@
       },
       "current_temp_offset": {
         "name": "Current Temperature Offset"
+      },
+      "websocket_state": {
+        "name": "Live Connection",
+        "state": {
+          "stopped": "Stopped",
+          "connecting": "Connecting",
+          "connected": "Connected",
+          "reconnecting": "Reconnecting",
+          "device_offline": "Device offline",
+          "auth_failed": "Auth failed"
+        }
       }
     }
   }

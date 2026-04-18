@@ -406,26 +406,68 @@ def probe_power(token: str, device: dict, on: bool) -> None:
 
 # ── websocket ──────────────────────────────────────────────────────────────
 #
-# Reverse-engineered from the Hermes bytecode in the Orion Android APK:
-#
 #   URL: wss://live.api1.orionbed.com/device/<serial_number>?token=<JWT>
 #
-# Key findings (from decompilation of useDeviceWebSocket):
+# Reverse-engineered from the Hermes bytecode in the Orion Android APK and
+# then validated against the live server (see `run_ws_scenario` below, which
+# opens a WS and drives REST mutations while logging every frame).
+#
+# Connection notes:
 #   - The path is `/device/<serial_number>` (the device's serial_number, NOT
 #     its UUID/id).  The server responds 400 for `/device/` (missing serial)
-#     and 404 with {"error":"Not Found","message":"Device not found"} for
-#     any non-serial value.
+#     and 404 {"error":"Not Found","message":"Device not found"} for any
+#     non-serial value.
 #   - The token is a URL-encoded query parameter (not a header or subprotocol).
+#   - Cloudflare fronts the host; the SSL context must force ALPN to
+#     `http/1.1` or the WS Upgrade is rejected.
+#   - Working User-Agent: `okhttp/4.12.0` (what the Android app sends).
 #   - There is NO JSON subscribe/unsubscribe handshake.  The server pushes
-#     messages immediately on connect, starting with a `live_device.snapshot`.
-#   - One WebSocket is opened per device.  The app's useDeviceWebSocket hook
-#     ties the connection to the currently selected device.
-#   - On background, the client closes with code 1001.
+#     messages immediately on connect.
+#   - On background / shutdown, the client closes with code 1001.
 #
-# Known server -> client message shapes:
-#   {"type":"live_device.snapshot","payload":{
-#      "serial_number":"…","model":"…","zones":[{"id":"zone_a","temp":20.5,"on":false},…],
-#      "led_brightness":0,"water_fill":"unknown",…}}
+# Event taxonomy (exhaustive as of the last capture):
+#
+#   live_device.snapshot     once immediately after connect; full state
+#   live_device.update       on every REST-triggered state change AND
+#                            ~every 2s as an idle heartbeat/refresh
+#
+# Both events use the envelope {"type": <event>, "payload": {...}} and share
+# the same payload shape.  Summary of the payload:
+#
+#   payload.serial_number         string (matches the path)
+#   payload.model                 e.g. "OSCT001-1"
+#   payload.zones[]               setpoints (user intent):
+#                                   {"id": "zone_a|zone_b", "temp": 20.5, "on": false}
+#   payload.led_brightness        int (0-100)
+#   payload.water_fill            string (observed "unknown")
+#   payload.is_in_water_fill_mode bool
+#   payload.status.online         bool
+#   payload.status.firmware       {"cb": "2.6.0", "ib": "2.5.0"}
+#   payload.status.firmware_update {workflow_id, started_at, updated_at,
+#                                   in_progress, current_step, completed_at,
+#                                   result}  (unix ms timestamps)
+#   payload.status.pending_update {"is_available": bool}
+#   payload.status.network        {last_seen, name, ip, rssi, uptime, mac}
+#   payload.status.safety         {error, error_codes[], error_descriptions[]}
+#   payload.status.zones[]        measured (distinct from setpoints):
+#                                   {"id": "...", "temp": 21.9, "thermal_state": "standby"}
+#   payload.status.sensors.sensor1, sensor2
+#                                 {heart_rate, breath_rate, status, status_text,
+#                                  sign_of_asleep, sign_of_wake_up, timestamp,
+#                                  uptime, is_working, firmware_version,
+#                                  hardware_version}
+#   payload.timeline[]            present on live_device.update only (may be
+#                                 empty).  Today's scheduled actions from
+#                                 /v1/sleep-schedules:
+#                                   {id, user_id, label (bedtime|phase_1|
+#                                    phase_2|wake_up|turn_off), scheduled_time,
+#                                    action: {zones: [...]}, created_at}
+#
+# Notable:
+#   - set_user_away does NOT emit a distinct event type; it results in another
+#     live_device.update with the zones turned off / back on.
+#   - No client-to-server messages are sent or required.
+#   - The ~2s idle refresh also serves as an application-level keepalive.
 
 WS_BASE_URL = "wss://live.api1.orionbed.com"
 
@@ -534,6 +576,295 @@ def run_websocket(
     asyncio.run(_ws_connect_and_listen(token, serials, duration))
 
 
+# ── websocket scenario (WS capture + REST edits interleaved) ───────────────
+#
+# --ws-scenario opens a per-device WebSocket and drives a scripted sequence of
+# REST edits on the live endpoints while logging everything with monotonic
+# timestamps.  Used to enumerate the server -> client event taxonomy.
+#
+# The scenario:
+#   1. Snapshots initial zone state (on/temp) for each device.
+#   2. Waits WS_SCENARIO_IDLE_SECONDS for idle baseline traffic.
+#   3. Toggles each zone off / on via PUT /v1/devices/{serial}/live/zones/{zone}
+#   4. Sets zone temp to a "low" then "high" value.
+#   5. Bulk-turns all zones off then on via PUT /v1/devices/{serial}/live.
+#   6. Toggles set_user_away(True) then set_user_away(False).
+#   7. Restores the initial per-zone state captured in step 1.
+#   8. Drains WS for WS_SCENARIO_TAIL_SECONDS to capture delayed pushes.
+#   9. Closes the WS connections with code 1001.
+
+
+WS_SCENARIO_IDLE_SECONDS = 15.0
+WS_SCENARIO_STEP_SECONDS = 8.0
+WS_SCENARIO_TAIL_SECONDS = 20.0
+WS_SCENARIO_LOW_TEMP = 21.0
+WS_SCENARIO_HIGH_TEMP = 28.0
+
+
+def _scenario_log(tag: str, msg: str, *, start: float) -> None:
+    t = time.monotonic() - start
+    print(f"[T+{t:7.2f}s] [{tag}] {msg}", flush=True)
+
+
+async def _ws_capture_one(
+    token: str,
+    serial: str,
+    stop: asyncio.Event,
+    start: float,
+) -> None:
+    """Open a WS and log every frame until `stop` is set."""
+    import websockets
+    from urllib.parse import quote
+
+    url = f"{WS_BASE_URL}/device/{quote(serial, safe='')}?token={token}"
+    _scenario_log("WS", f"connecting serial={serial}", start=start)
+
+    try:
+        async with websockets.connect(
+            url,
+            ssl=_ws_ssl_context(),
+            user_agent_header="okhttp/4.12.0",
+            ping_interval=None,  # let the server drive pings; keep our log quiet
+        ) as ws:
+            _scenario_log("WS", f"connected serial={serial}", start=start)
+            count = 0
+            while not stop.is_set():
+                try:
+                    async with asyncio.timeout(0.5):
+                        msg = await ws.recv()
+                except TimeoutError:
+                    continue
+                count += 1
+                try:
+                    data = json.loads(msg)
+                    # Collapse large payloads to one line in the log for
+                    # easier event-taxonomy enumeration; also print full
+                    # pretty form for the first 3 messages of each kind.
+                    kind = None
+                    if isinstance(data, dict):
+                        kind = data.get("type") or data.get("event")
+                    _scenario_log(
+                        f"WS/{serial[-6:]}",
+                        f"#{count} type={kind!r}",
+                        start=start,
+                    )
+                    print(json.dumps(data, indent=2), flush=True)
+                except (json.JSONDecodeError, TypeError):
+                    _scenario_log(
+                        f"WS/{serial[-6:]}",
+                        f"#{count} raw={msg!r}",
+                        start=start,
+                    )
+            _scenario_log("WS", f"closing serial={serial} (total={count})", start=start)
+            await ws.close(1001, "scenario done")
+    except Exception as e:
+        _scenario_log(
+            "WS", f"error serial={serial}: {type(e).__name__}: {e}", start=start
+        )
+
+
+async def _scenario_sleep(seconds: float, start: float, label: str) -> None:
+    _scenario_log("WAIT", f"{label} — sleeping {seconds:.1f}s", start=start)
+    await asyncio.sleep(seconds)
+
+
+async def _scenario_rest(
+    token: str,
+    devices: list[dict],
+    user_id: str,
+    stop: asyncio.Event,
+    start: float,
+) -> None:
+    """Drive the REST sequence.  `devices` is the list from /v1/devices."""
+    # Snapshot initial state so we can restore it.
+    initial: list[tuple[str, list[dict]]] = []
+    for d in devices:
+        serial = d.get("serial_number")
+        zones = d.get("zones") or []
+        snapshot = []
+        for z in zones:
+            # We only have the `zones[].user` from /v1/devices; actual
+            # `on`/`temp` live-state comes from GET /v1/devices/{serial}/live.
+            snapshot.append({"id": z["id"]})
+        if serial and snapshot:
+            initial.append((serial, snapshot))
+
+    # Fetch per-serial live state to capture true on/temp for restore.
+    live_initial: dict[str, dict] = {}
+    for serial, _ in initial:
+        try:
+            resp = requests.get(
+                _url(f"/v1/devices/{serial}/live"),
+                headers=_headers(token),
+                timeout=10,
+            )
+            body = _check(resp, f"get live {serial}")
+            if isinstance(body, dict):
+                live_initial[serial] = (body.get("response") or body).get(
+                    "zones", []
+                ) or body.get("zones", [])
+        except Exception as e:
+            _scenario_log("REST", f"failed to snapshot live {serial}: {e}", start=start)
+
+    _scenario_log(
+        "REST", f"initial live state: {json.dumps(live_initial)}", start=start
+    )
+
+    await _scenario_sleep(WS_SCENARIO_IDLE_SECONDS, start, "idle baseline")
+    if stop.is_set():
+        return
+
+    # Step through each device.
+    for serial, zones in initial:
+        first_zone = zones[0]["id"]
+
+        # --- single-zone power off
+        status, text = set_zone(token, serial, first_zone, on=False)
+        _scenario_log(
+            "REST",
+            f"PUT /live/zones/{first_zone} on=false -> {status} {text[:120]}",
+            start=start,
+        )
+        await _scenario_sleep(WS_SCENARIO_STEP_SECONDS, start, "after zone off")
+        if stop.is_set():
+            break
+
+        # --- single-zone power on
+        status, text = set_zone(token, serial, first_zone, on=True)
+        _scenario_log(
+            "REST",
+            f"PUT /live/zones/{first_zone} on=true -> {status} {text[:120]}",
+            start=start,
+        )
+        await _scenario_sleep(WS_SCENARIO_STEP_SECONDS, start, "after zone on")
+        if stop.is_set():
+            break
+
+        # --- single-zone temp change (low)
+        status, text = set_zone(token, serial, first_zone, temp=WS_SCENARIO_LOW_TEMP)
+        _scenario_log(
+            "REST",
+            f"PUT /live/zones/{first_zone} temp={WS_SCENARIO_LOW_TEMP} -> {status} {text[:120]}",
+            start=start,
+        )
+        await _scenario_sleep(WS_SCENARIO_STEP_SECONDS, start, "after zone temp low")
+        if stop.is_set():
+            break
+
+        # --- single-zone temp change (high)
+        status, text = set_zone(token, serial, first_zone, temp=WS_SCENARIO_HIGH_TEMP)
+        _scenario_log(
+            "REST",
+            f"PUT /live/zones/{first_zone} temp={WS_SCENARIO_HIGH_TEMP} -> {status} {text[:120]}",
+            start=start,
+        )
+        await _scenario_sleep(WS_SCENARIO_STEP_SECONDS, start, "after zone temp high")
+        if stop.is_set():
+            break
+
+        # --- bulk all zones off
+        bulk_off = [{"id": z["id"], "on": False} for z in zones]
+        status, text = set_device_zones(token, serial, bulk_off)
+        _scenario_log(
+            "REST", f"PUT /live bulk off -> {status} {text[:120]}", start=start
+        )
+        await _scenario_sleep(WS_SCENARIO_STEP_SECONDS, start, "after bulk off")
+        if stop.is_set():
+            break
+
+        # --- bulk all zones on
+        bulk_on = [{"id": z["id"], "on": True} for z in zones]
+        status, text = set_device_zones(token, serial, bulk_on)
+        _scenario_log(
+            "REST", f"PUT /live bulk on -> {status} {text[:120]}", start=start
+        )
+        await _scenario_sleep(WS_SCENARIO_STEP_SECONDS, start, "after bulk on")
+        if stop.is_set():
+            break
+
+    if stop.is_set():
+        _scenario_log("REST", "stop requested, skipping away/restore", start=start)
+        return
+
+    # --- away mode on
+    if user_id:
+        result = set_user_away(token, user_id, is_away=True)
+        _scenario_log(
+            "REST",
+            f"POST /user-away is_away=true -> {json.dumps(result)[:160]}",
+            start=start,
+        )
+        await _scenario_sleep(WS_SCENARIO_STEP_SECONDS, start, "after set_away=true")
+
+        result = set_user_away(token, user_id, is_away=False)
+        _scenario_log(
+            "REST",
+            f"POST /user-away is_away=false -> {json.dumps(result)[:160]}",
+            start=start,
+        )
+        await _scenario_sleep(WS_SCENARIO_STEP_SECONDS, start, "after set_away=false")
+
+    if stop.is_set():
+        return
+
+    # --- restore original per-zone state
+    for serial, initial_zones in live_initial.items():
+        if not initial_zones:
+            continue
+        restore_body = []
+        for z in initial_zones:
+            entry = {"id": z.get("id")}
+            if "on" in z or "is_on" in z:
+                entry["on"] = bool(z.get("on", z.get("is_on")))
+            if "temp" in z and z.get("temp") is not None:
+                entry["temp"] = z["temp"]
+            if entry.get("id"):
+                restore_body.append(entry)
+        if restore_body:
+            status, text = set_device_zones(token, serial, restore_body)
+            _scenario_log(
+                "REST",
+                f"RESTORE PUT /live {serial}: {json.dumps(restore_body)} -> {status} {text[:120]}",
+                start=start,
+            )
+
+    await _scenario_sleep(WS_SCENARIO_TAIL_SECONDS, start, "tail drain")
+
+
+async def _run_ws_scenario(
+    token: str,
+    devices: list[dict],
+    user_id: str,
+) -> None:
+    start = time.monotonic()
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+
+    serials = [d["serial_number"] for d in devices if d.get("serial_number")]
+    if not serials:
+        print("[ERROR] no serials — cannot run scenario")
+        return
+
+    ws_tasks = [
+        asyncio.create_task(_ws_capture_one(token, s, stop, start)) for s in serials
+    ]
+    try:
+        await _scenario_rest(token, devices, user_id, stop, start)
+    finally:
+        stop.set()
+        await asyncio.gather(*ws_tasks, return_exceptions=True)
+
+
+def run_ws_scenario(
+    token: str,
+    devices: list[dict],
+    user_id: str,
+) -> None:
+    asyncio.run(_run_ws_scenario(token, devices, user_id))
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 
@@ -587,6 +918,13 @@ def main() -> None:
         type=float,
         default=60.0,
         help="How long to listen on the WebSocket in seconds (default: 60)",
+    )
+    parser.add_argument(
+        "--ws-scenario",
+        action="store_true",
+        help="Run a scripted sequence of REST edits (zone on/off, temp, bulk, "
+        "user-away) while logging WebSocket messages, to enumerate the event "
+        "taxonomy. Restores the original zone state at the end.",
     )
     args = parser.parse_args()
 
@@ -689,6 +1027,14 @@ def main() -> None:
             d.get("serial_number") for d in device_list if d.get("serial_number")
         ]
         run_websocket(access_token, ws_serials, duration=args.ws_duration)
+
+    # ── WebSocket scenario (interleaved capture) ──────────────────────
+    if args.ws_scenario:
+        user_id = ""
+        if user:
+            resp_data = user.get("response", user)
+            user_id = resp_data.get("id", "")
+        run_ws_scenario(access_token, device_list, user_id)
 
 
 if __name__ == "__main__":
