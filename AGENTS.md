@@ -55,8 +55,9 @@ https://api1.orionbed.com
 | PUT | `/v1/sleep-schedules` | Bearer | Update schedule. Body: `{"schedules": [{"day": N, field: value}]}`. Partial updates work (only specified field changes). |
 | POST | `/v1/sleep-configurations/user-away` | Bearer | Presence override. Body: `{"user_id": "...", "is_away": bool}`. Also powers the device down; prefer `/v1/devices/{id}/live` for pure power control. |
 | PUT | `/v1/devices/{deviceId}` | Bearer | Update metadata (`name`, `orientation`, `timezone`). Partial updates accepted. |
-| PUT | `/v1/devices/{deviceId}/live` | Bearer | **Canonical power/temp primitive.** Body: `{"zones": [{"id": "zone_a", "on": bool, "temp": float}, ...]}`. Each zone requires `id` and at least one of `on`/`temp` (Celsius). |
-| PUT | `/v1/devices/{deviceId}/live/zones/{zoneId}` | Bearer | Single-zone power/temp. Body: `{on?, temp?}` with `minProperties: 1`. |
+| GET | `/v1/devices/{serial_number}/live` | Bearer | **Live runtime snapshot** (zones with `on`/`temp`, status, sensors, firmware). Path uses `serial_number`, NOT UUID. |
+| PUT | `/v1/devices/{serial_number}/live` | Bearer | **Canonical power/temp primitive.** Path uses `serial_number`, NOT UUID (UUID returns `403 "Device not found"`). Body: `{"zones": [{"id": "zone_a", "on": bool, "temp": float}, ...]}`. Each zone requires `id` and at least one of `on`/`temp` (Celsius). |
+| PUT | `/v1/devices/{serial_number}/live/zones/{zoneId}` | Bearer | Single-zone power/temp. Path uses `serial_number`. Body: `{on?, temp?}` with `minProperties: 1`. |
 | POST | `/v1/devices/{deviceId}/action` | Bearer | Device action (quiet_mode, reboot, LED brightness, etc.). **No power action** — `DeviceAllowedAction` enum contains no on/off. Body: `{"action": "...", "value"?: ...}`. |
 | POST | `/v1/devices/{deviceId}/activate` | Bearer | Pair device to account. Body: `{"model": "OSCT001-1"}`. |
 | POST | `/v1/devices/{deviceId}/deactivate` | Bearer | Unpair device. |

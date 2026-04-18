@@ -44,6 +44,10 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         )
         self.api_client = api_client
         self.devices: list[dict] = []
+        # Live snapshots keyed by device id (UUID). Populated each poll
+        # from GET /v1/devices/{serial}/live — this is where zone on/temp
+        # actually live, since GET /v1/devices doesn't expose them.
+        self.live_devices: dict[str, dict] = {}
         self.user: dict = {}
         self.user_id: str = ""
 
@@ -72,14 +76,30 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             "insights": {},
         }
 
-        # Re-fetch devices to detect away/present state changes.
-        # When a user is "away" (device off), zones lose their user field.
+        # Re-fetch devices each poll so zone/user changes surface.
         try:
             self.devices = await self.api_client.list_devices()
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
             _LOGGER.warning("Failed to refresh device list: %s", err)
+
+        # Fetch the live snapshot for each device (zone on/temp + status).
+        # GET /v1/devices does NOT include the `on` field; GET /v1/devices/
+        # {serial}/live does. The /live path uses serial_number, not UUID.
+        new_live: dict[str, dict] = {}
+        for device in self.devices:
+            dev_id = device.get("id")
+            serial = device.get("serial_number")
+            if not dev_id or not serial:
+                continue
+            try:
+                new_live[dev_id] = await self.api_client.get_live_device(serial)
+            except OrionAuthError as err:
+                raise ConfigEntryAuthFailed(str(err)) from err
+            except (OrionApiError, OrionConnectionError) as err:
+                _LOGGER.warning("Failed to fetch live state for %s: %s", serial, err)
+        self.live_devices = new_live
 
         try:
             data["schedules"] = await self.api_client.get_sleep_schedules()
@@ -137,28 +157,22 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     def is_device_on(self, device_id: str) -> bool | None:
         """Check if the device is on.
 
-        Reads the per-zone `on` / `is_on` field as set by
-        `PUT /v1/devices/{id}/live`. Returns True if any zone is on,
-        False if all zones report off, and None if no zone exposes a
-        power field.
+        Reads the per-zone `on` field from the live snapshot
+        (`GET /v1/devices/{serial}/live`). Returns True if any zone is
+        on, False if all zones report off, and None if no live snapshot
+        is available yet.
         """
-        for device in self.devices:
-            if device.get("id") != device_id:
-                continue
-            zones = device.get("zones", [])
-            if not zones:
-                return None
-
-            saw_explicit = False
-            any_on = False
-            for zone in zones:
-                for key in ("on", "is_on"):
-                    if key in zone:
-                        saw_explicit = True
-                        if zone.get(key):
-                            any_on = True
-                        break
-            if not saw_explicit:
-                return None
-            return any_on
-        return None
+        live = self.live_devices.get(device_id)
+        if not live:
+            return None
+        zones = live.get("zones", [])
+        if not zones:
+            return None
+        saw_any = False
+        any_on = False
+        for zone in zones:
+            if "on" in zone:
+                saw_any = True
+                if zone.get("on"):
+                    any_on = True
+        return any_on if saw_any else None

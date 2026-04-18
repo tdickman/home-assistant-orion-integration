@@ -281,6 +281,18 @@ class OrionApiClient:
 
     # ── Device live / metadata / action endpoints ─────────────────────
 
+    async def get_live_device(self, device_serial: str) -> dict:
+        """GET /v1/devices/{serial_number}/live — live runtime snapshot.
+
+        Returns the per-device live state: zone on/off + temp, network,
+        firmware, sensors, etc. Path uses `serial_number`, NOT the UUID.
+        Response shape: {"response": {"serial_number", "zones": [{"id",
+        "temp", "on"}, ...], "status": {...}, ...}, "success": true}.
+        """
+        await self.ensure_valid_token()
+        data = await self._request("GET", f"/v1/devices/{device_serial}/live")
+        return data.get("response", data)
+
     async def update_device(self, device_id: str, **fields: Any) -> dict:
         """PUT /v1/devices/{deviceId} — update device metadata.
 
@@ -290,12 +302,18 @@ class OrionApiClient:
         await self.ensure_valid_token()
         return await self._request("PUT", f"/v1/devices/{device_id}", json_data=fields)
 
-    async def update_live_device_zones(self, device_id: str, zones: list[dict]) -> dict:
-        """PUT /v1/devices/{deviceId}/live — bulk update zone power/temp.
+    async def update_live_device_zones(
+        self, device_serial: str, zones: list[dict]
+    ) -> dict:
+        """PUT /v1/devices/{serial_number}/live — bulk update zone power/temp.
 
         This is the canonical power control endpoint. Each zone dict must
         include `id` and at least one of `on` (bool) or `temp` (float,
         Celsius for OSCT001-1).
+
+        **Path uses `serial_number`, NOT the device UUID `id`.** Calling
+        this with the UUID returns `403 "Device not found"`. Verified via
+        `orion_info.py --power-on/--power-off`.
 
         Example:
             zones=[{"id": "zone_a", "on": True, "temp": 20.5},
@@ -304,19 +322,22 @@ class OrionApiClient:
         await self.ensure_valid_token()
         return await self._request(
             "PUT",
-            f"/v1/devices/{device_id}/live",
+            f"/v1/devices/{device_serial}/live",
             json_data={"zones": zones},
         )
 
     async def update_live_device_zone(
         self,
-        device_id: str,
+        device_serial: str,
         zone_id: str,
         *,
         on: bool | None = None,
         temp: float | None = None,
     ) -> dict:
-        """PUT /v1/devices/{deviceId}/live/zones/{zoneId} — single-zone update.
+        """PUT /v1/devices/{serial_number}/live/zones/{zoneId} — single-zone update.
+
+        Same identifier rule as `update_live_device_zones`: the path
+        segment is the device's `serial_number`, not its UUID `id`.
 
         At least one of `on` or `temp` must be provided. `temp` is in the
         device's native unit (Celsius for OSCT001-1).
@@ -331,7 +352,7 @@ class OrionApiClient:
             raise ValueError("update_live_device_zone requires `on` or `temp`")
         return await self._request(
             "PUT",
-            f"/v1/devices/{device_id}/live/zones/{zone_id}",
+            f"/v1/devices/{device_serial}/live/zones/{zone_id}",
             json_data=body,
         )
 

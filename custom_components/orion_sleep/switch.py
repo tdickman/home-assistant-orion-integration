@@ -63,35 +63,36 @@ class OrionPowerSwitch(OrionBaseEntity, SwitchEntity):
         """Return True if the device is on."""
         return self.coordinator.is_device_on(self._device_id)
 
-    def _zone_ids(self) -> list[str]:
-        """Return the zone ids for this device."""
+    def _device(self) -> dict | None:
+        """Return the device dict for this entity, or None."""
         for device in self.coordinator.devices:
-            if device.get("id") != self._device_id:
-                continue
-            return [z.get("id") for z in device.get("zones", []) if z.get("id")]
-        return []
+            if device.get("id") == self._device_id:
+                return device
+        return None
+
+    async def _set_power(self, on: bool) -> None:
+        """Send on=<bool> to every zone via PUT /v1/devices/{serial}/live."""
+        device = self._device()
+        if not device:
+            return
+        # The /live endpoints use serial_number in the path, NOT the UUID.
+        serial = device.get("serial_number")
+        zone_ids = [z.get("id") for z in device.get("zones", []) if z.get("id")]
+        if not serial or not zone_ids:
+            return
+        await self.coordinator.api_client.update_live_device_zones(
+            device_serial=serial,
+            zones=[{"id": zid, "on": on} for zid in zone_ids],
+        )
+        await self.coordinator.async_request_refresh()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on the device via PUT /v1/devices/{id}/live."""
-        zone_ids = self._zone_ids()
-        if not zone_ids:
-            return
-        await self.coordinator.api_client.update_live_device_zones(
-            device_id=self._device_id,
-            zones=[{"id": zid, "on": True} for zid in zone_ids],
-        )
-        await self.coordinator.async_request_refresh()
+        """Turn on the device via PUT /v1/devices/{serial}/live."""
+        await self._set_power(True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn off the device via PUT /v1/devices/{id}/live."""
-        zone_ids = self._zone_ids()
-        if not zone_ids:
-            return
-        await self.coordinator.api_client.update_live_device_zones(
-            device_id=self._device_id,
-            zones=[{"id": zid, "on": False} for zid in zone_ids],
-        )
-        await self.coordinator.async_request_refresh()
+        """Turn off the device via PUT /v1/devices/{serial}/live."""
+        await self._set_power(False)
 
 
 class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):

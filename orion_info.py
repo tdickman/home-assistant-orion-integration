@@ -289,17 +289,23 @@ def get_sleep_config_temperature(token: str) -> Any:
 #   - POST /v1/devices/{id}/action              (quiet_mode, reboot, etc.)
 
 
+def _put_raw(token: str, path: str, body: dict) -> tuple[int, str]:
+    """PUT a JSON body and return (status, text) without raising."""
+    resp = requests.put(_url(path), json=body, headers=_headers(token))
+    return resp.status_code, resp.text
+
+
 def set_zone(
     token: str,
-    device_id: str,
+    device_ident: str,
     zone_id: str,
     on: bool | None = None,
     temp: float | None = None,
-) -> Any:
-    """PUT /v1/devices/{device_id}/live/zones/{zone_id} — per-zone control.
+) -> tuple[int, str]:
+    """PUT /v1/devices/{device_ident}/live/zones/{zone_id} — per-zone control.
 
-    Provide `on` to toggle power and/or `temp` to set the target temperature
-    (in the device's native unit — celsius for OSCT001-1).
+    `device_ident` is whatever the server accepts in the path (id or
+    serial_number — that's what we're probing).  Returns (status, text).
     """
     body: dict = {}
     if on is not None:
@@ -308,54 +314,94 @@ def set_zone(
         body["temp"] = temp
     if not body:
         raise ValueError("set_zone: specify at least one of on= or temp=")
-    resp = requests.put(
-        _url(f"/v1/devices/{device_id}/live/zones/{zone_id}"),
-        json=body,
-        headers=_headers(token),
-    )
-    return _check(resp, f"set_zone({zone_id})")
+    return _put_raw(token, f"/v1/devices/{device_ident}/live/zones/{zone_id}", body)
 
 
 def set_device_zones(
     token: str,
-    device_id: str,
+    device_ident: str,
     zones: list[dict],
-) -> Any:
-    """PUT /v1/devices/{device_id}/live — bulk update all zones in one call.
+) -> tuple[int, str]:
+    """PUT /v1/devices/{device_ident}/live — bulk zone update.
 
     `zones` is a list of {"id": str, "on": bool?, "temp": float?} dicts.
+    Returns (status, text) without raising.
     """
-    body = {"zones": zones}
-    resp = requests.put(
-        _url(f"/v1/devices/{device_id}/live"),
-        json=body,
-        headers=_headers(token),
-    )
-    return _check(resp, "set_device_zones")
+    return _put_raw(token, f"/v1/devices/{device_ident}/live", {"zones": zones})
 
 
-def set_device_power(
-    token: str,
-    device: dict,
-    on: bool,
-    temp: float | None = None,
-) -> Any:
-    """Turn every zone of a device on or off in a single bulk call.
-
-    Mirrors the app's "all zones" toggle path.  `device` is a device dict
-    from GET /v1/devices (must contain "id" and "zones").
-    """
-    device_id = device["id"]
-    zone_list = device.get("zones") or []
+def _zones_body(device: dict, on: bool, temp: float | None = None) -> list[dict]:
     zones_body: list[dict] = []
-    for z in zone_list:
+    for z in device.get("zones") or []:
         entry: dict = {"id": z["id"], "on": on}
         if temp is not None:
             entry["temp"] = temp
         zones_body.append(entry)
     if not zones_body:
-        raise ValueError("set_device_power: device has no zones")
-    return set_device_zones(token, device_id, zones_body)
+        raise ValueError("device has no zones")
+    return zones_body
+
+
+def probe_power(token: str, device: dict, on: bool) -> None:
+    """Probe the live power endpoints using both id and serial_number.
+
+    Prints the server response for each variant so we can figure out which
+    identifier and endpoint the API actually accepts.  The OpenAPI says
+    `id`, but the WebSocket path uses `serial_number` — this probes both.
+    """
+    device_id = device.get("id", "")
+    serial = device.get("serial_number", "")
+    zone_list = device.get("zones") or []
+    first_zone_id = zone_list[0]["id"] if zone_list else ""
+
+    attempts: list[tuple[str, str, dict]] = []
+    # Bulk-zone endpoint
+    if device_id:
+        attempts.append(
+            (
+                "bulk/id",
+                f"/v1/devices/{device_id}/live",
+                {"zones": _zones_body(device, on)},
+            )
+        )
+    if serial and serial != device_id:
+        attempts.append(
+            (
+                "bulk/serial",
+                f"/v1/devices/{serial}/live",
+                {"zones": _zones_body(device, on)},
+            )
+        )
+    # Single-zone endpoint (only works if we have a zone id)
+    if first_zone_id:
+        if device_id:
+            attempts.append(
+                (
+                    "zone/id",
+                    f"/v1/devices/{device_id}/live/zones/{first_zone_id}",
+                    {"on": on},
+                )
+            )
+        if serial and serial != device_id:
+            attempts.append(
+                (
+                    "zone/serial",
+                    f"/v1/devices/{serial}/live/zones/{first_zone_id}",
+                    {"on": on},
+                )
+            )
+
+    print(f"\n>>> Probing power={on} for device id={device_id} serial={serial}")
+    for label, path, body in attempts:
+        status, text = _put_raw(token, path, body)
+        print(f"  [{label:12s}] PUT {path}")
+        print(f"               body={json.dumps(body)}")
+        print(f"               -> {status}  {text[:300]}")
+        if 200 <= status < 300:
+            print(f"  [SUCCESS via {label}]")
+            # Don't keep trying once one works so we don't re-toggle the bed.
+            return
+    print("  [ALL ATTEMPTS FAILED]")
 
 
 # ── websocket ──────────────────────────────────────────────────────────────
@@ -520,6 +566,18 @@ def main() -> None:
         help="Turn on the mattress (undo away) then show state",
     )
     parser.add_argument(
+        "--power-on",
+        action="store_true",
+        help="Probe PUT /v1/devices/<ident>/live with on=true against each "
+        "device, trying id then serial_number (stops at first 2xx).",
+    )
+    parser.add_argument(
+        "--power-off",
+        action="store_true",
+        help="Probe PUT /v1/devices/<ident>/live with on=false against each "
+        "device, trying id then serial_number (stops at first 2xx).",
+    )
+    parser.add_argument(
         "--websocket",
         action="store_true",
         help="Connect to the live WebSocket and log real-time device messages",
@@ -610,6 +668,18 @@ def main() -> None:
             schedules2 = get_sleep_schedules(access_token)
             if schedules2 is not None:
                 _pretty("Sleep Schedules (after)", schedules2)
+
+    # ── Power probe (PUT /v1/devices/<ident>/live) ───────────────────
+    if args.power_on or args.power_off:
+        desired = args.power_on  # True for power-on, False for power-off
+        for device in device_list:
+            probe_power(access_token, device, on=desired)
+
+        # Re-fetch to show the post-probe state
+        print("\n>>> Re-fetching devices after power probe...")
+        devices_after = list_devices(access_token)
+        if devices_after is not None:
+            _pretty("Devices (after power probe)", devices_after)
 
     # ── WebSocket ─────────────────────────────────────────────────────
     if args.websocket:
