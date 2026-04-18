@@ -104,7 +104,14 @@ class OrionClimateEntity(OrionBaseEntity, ClimateEntity):
 
     @property
     def hvac_mode(self) -> HVACMode:
-        """Return the current HVAC mode."""
+        """Return the current HVAC mode.
+
+        Reports OFF whenever the device's live power state is off, even
+        if a schedule is active — the schedule won't drive the bed until
+        power is turned back on.
+        """
+        if self.coordinator.is_device_on(self._device_id) is False:
+            return HVACMode.OFF
         schedule = self.coordinator.get_today_schedule()
         if schedule and schedule.get("bedtime_is_active"):
             return HVACMode.HEAT_COOL
