@@ -31,6 +31,7 @@ from typing import Any
 from urllib.parse import quote
 
 import aiohttp
+from homeassistant.core import HomeAssistant
 
 from .api import OrionApiClient, OrionAuthError
 from .const import (
@@ -66,15 +67,42 @@ class OrionWsState:
     STOPPED = "stopped"
 
 
+# Built once and shared by every client. `ssl.create_default_context()`
+# loads the system CA bundle from disk, so it must never run on the event
+# loop -- Home Assistant flags it as
+# "Detected blocking call to set_default_verify_paths".
+_SSL_CONTEXT: ssl.SSLContext | None = None
+
+
 def _build_ssl_context() -> ssl.SSLContext:
     """Return an SSL context that forces HTTP/1.1 via ALPN.
 
     Cloudflare negotiates HTTP/2 by default which breaks the WS Upgrade
     handshake (RFC 6455 requires HTTP/1.1). Confirmed on-wire.
+
+    BLOCKING -- reads CA files. Call via `_async_get_ssl_context`, never
+    directly from the event loop.
     """
     ctx = ssl.create_default_context()
     ctx.set_alpn_protocols(["http/1.1"])
     return ctx
+
+
+async def _async_get_ssl_context(hass: HomeAssistant) -> ssl.SSLContext:
+    """Build the shared SSL context in the executor, once.
+
+    Home Assistant's own `homeassistant.util.ssl` helpers are deliberately
+    not used here: they return a process-wide shared context, and this
+    integration has to set ALPN on it. Mutating the shared context would
+    leak an http/1.1-only restriction into every other integration.
+
+    A concurrent first call can build the context twice; that is harmless
+    and idempotent, so no lock is taken.
+    """
+    global _SSL_CONTEXT  # noqa: PLW0603
+    if _SSL_CONTEXT is None:
+        _SSL_CONTEXT = await hass.async_add_executor_job(_build_ssl_context)
+    return _SSL_CONTEXT
 
 
 class OrionWebSocketClient:
@@ -87,19 +115,22 @@ class OrionWebSocketClient:
 
     def __init__(
         self,
+        hass: HomeAssistant,
         session: aiohttp.ClientSession,
         api_client: OrionApiClient,
         serial_number: str,
         on_message: MessageHandler,
         on_state_change: StateHandler | None = None,
     ) -> None:
+        self._hass = hass
         self._session = session
         self._api_client = api_client
         self._serial = serial_number
         self._on_message = on_message
         self._on_state_change = on_state_change
 
-        self._ssl_ctx = _build_ssl_context()
+        # Created lazily on first connect -- see _async_get_ssl_context.
+        self._ssl_ctx: ssl.SSLContext | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._ws: aiohttp.ClientWebSocketResponse | None = None
@@ -227,6 +258,8 @@ class OrionWebSocketClient:
         _LOGGER.debug("Orion WS connecting to /device/%s", self._serial)
 
         try:
+            if self._ssl_ctx is None:
+                self._ssl_ctx = await _async_get_ssl_context(self._hass)
             ws = await self._session.ws_connect(
                 url,
                 ssl=self._ssl_ctx,
@@ -375,11 +408,13 @@ class OrionWebSocketManager:
 
     def __init__(
         self,
+        hass: HomeAssistant,
         session: aiohttp.ClientSession,
         api_client: OrionApiClient,
         on_message: MessageHandler,
         on_state_change: StateHandler | None = None,
     ) -> None:
+        self._hass = hass
         self._session = session
         self._api_client = api_client
         self._on_message = on_message
@@ -408,6 +443,7 @@ class OrionWebSocketManager:
             if serial in self._clients:
                 continue
             client = OrionWebSocketClient(
+                self._hass,
                 self._session,
                 self._api_client,
                 serial,
