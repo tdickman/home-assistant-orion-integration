@@ -357,21 +357,52 @@ class OrionApiClient:
         )
 
     async def device_action(
-        self, device_id: str, action: str, value: Any | None = None
+        self, device_serial: str, action: str, value: Any | None = None
     ) -> dict:
         """POST /v1/devices/{deviceId}/action — perform device action.
 
-        Not a power endpoint. Valid actions (per DeviceAllowedAction enum):
-        split, swap, device_name, device_orientation, device_led_brightness,
-        device_quiet_mode, device_reboot, device_reset, device_forget_wifi,
-        device_deactivate, invite_user, add_new_guest, remove_guest.
+        🔴 MEASURED 2026-07-26, against the live API: this endpoint accepts
+        **only two** values, and it wants the BARE name::
+
+            reboot        forget_wifi
+
+        Anything else returns::
+
+            400 {"success": false,
+                 "error": "Invalid action_type. Must be \\"reboot\\" or \\"forget_wifi\\""}
+
+        The 12-member `DeviceAllowedAction` enum and the `allowed_actions`
+        array on `GET /v1/devices` are a **UI capability list** — they tell
+        the app which controls to render, NOT what this endpoint takes.
+        Each of those capabilities is performed by its own endpoint, e.g.::
+
+            split  -> POST /v1/sleep-configurations/user-split-user-zones
+            swap   -> POST /v1/sleep-configurations/user-swap-user-sides
+            name   -> PUT  /v1/devices/{deviceId}
+
+        `device_quiet_mode` and `device_led_brightness` are readable in the
+        live snapshot but have **no discovered write path at all**.
+
+        🔴 Takes the **serial_number**, NOT the UUID. Sending the UUID
+        returns `404 {"success": false, "error": "Device not found"}` —
+        the same identifier rule as the live endpoints, despite the spec
+        naming this path parameter `deviceId`.
+
+        Not a power endpoint either — power is `PUT .../live[/zones/{id}]`.
         """
         await self.ensure_valid_token()
-        body: dict[str, Any] = {"action": action}
+        # The request key is `action_type`, NOT `action`. Proven by two
+        # calls: `action="device_led_brightness"` and `action="reboot"`
+        # returned the *same* "Invalid action_type" error — so the server
+        # was never reading `action` at all. Sending `action` means this
+        # endpoint has never worked.
+        body: dict[str, Any] = {"action_type": action}
         if value is not None:
+            # No observed action takes a payload (`reboot`/`forget_wifi`
+            # are both bare), so this key name is still unverified.
             body["value"] = value
         return await self._request(
-            "POST", f"/v1/devices/{device_id}/action", json_data=body
+            "POST", f"/v1/devices/{device_serial}/action", json_data=body
         )
 
     async def activate_device(self, device_id: str, model: str) -> dict:

@@ -418,3 +418,118 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 if zone.get("on"):
                     any_on = True
         return any_on if saw_any else None
+
+    # ── Per-zone live state ───────────────────────────────────────────
+    #
+    # Two different zone lists live in the same snapshot and they do NOT
+    # mean the same thing:
+    #
+    #   live["zones"][]           -> {id, on, temp}    temp is the SETPOINT
+    #   live["status"]["zones"][] -> {id, temp,
+    #                                 thermal_state}   temp is MEASURED
+    #
+    # Mixing them up silently reports the target as the actual, which
+    # looks plausible on a dashboard and is wrong. Keep them separate.
+
+    def _zone_entry(
+        self, device_id: str, zone_id: str, *, measured: bool
+    ) -> dict[str, Any] | None:
+        """Find one zone's dict in either the setpoint or measured list."""
+        live = self.live_devices.get(device_id)
+        if not live:
+            return None
+        zones = (live.get("status", {}) if measured else live).get("zones", [])
+        for zone in zones or []:
+            if zone.get("id") == zone_id:
+                return zone
+        return None
+
+    def zone_setpoint(self, device_id: str, zone_id: str) -> float | None:
+        """Target temperature (°C) for one zone, from `live.zones[].temp`."""
+        zone = self._zone_entry(device_id, zone_id, measured=False)
+        if not zone:
+            return None
+        temp = zone.get("temp")
+        return float(temp) if temp is not None else None
+
+    def zone_measured_temp(self, device_id: str, zone_id: str) -> float | None:
+        """Measured temperature (°C), from `live.status.zones[].temp`."""
+        zone = self._zone_entry(device_id, zone_id, measured=True)
+        if not zone:
+            return None
+        temp = zone.get("temp")
+        return float(temp) if temp is not None else None
+
+    def zone_is_on(self, device_id: str, zone_id: str) -> bool | None:
+        """Power state for one zone, from `live.zones[].on`."""
+        zone = self._zone_entry(device_id, zone_id, measured=False)
+        if not zone or "on" not in zone:
+            return None
+        return bool(zone.get("on"))
+
+    def zone_thermal_state(self, device_id: str, zone_id: str) -> str | None:
+        """Raw `thermal_state` for one zone.
+
+        Only ``"standby"`` has actually been observed on the wire; heating
+        and cooling values are inferred from the field name and have never
+        been captured. Callers must treat any unrecognised value as unknown
+        rather than guessing a direction.
+        """
+        zone = self._zone_entry(device_id, zone_id, measured=True)
+        if not zone:
+            return None
+        state = zone.get("thermal_state")
+        return str(state) if state is not None else None
+
+    def device_zone_ids(self, device_id: str) -> list[str]:
+        """Zone ids for a device, preferring the live snapshot.
+
+        `GET /v1/devices` also carries a `zones[]`, but it is the
+        *membership* list (zone -> user) and is not guaranteed to be
+        ordered or populated the same way as the live runtime list.
+        """
+        live = self.live_devices.get(device_id) or {}
+        ids = [z.get("id") for z in live.get("zones", []) or [] if z.get("id")]
+        if ids:
+            return ids
+        for device in self.devices:
+            if device.get("id") == device_id:
+                return [
+                    z.get("id") for z in device.get("zones", []) or [] if z.get("id")
+                ]
+        return []
+
+    # ── Device-level actions (POST /v1/devices/{deviceId}/action) ─────
+    #
+    # NOTE the identifier flip: the action endpoint takes the device's
+    # UUID `id`, while the live endpoints take `serial_number`. Getting
+    # this backwards is a 403 on one and a 404 on the other.
+
+    def device_allowed_actions(self, device_id: str) -> set[str]:
+        """Actions the *server* says this account may perform.
+
+        Sourced from `permissions.allowed_actions` on `GET /v1/devices`.
+        Entities gate their own existence on this, so an action the
+        account cannot perform never appears as a control at all rather
+        than appearing and failing with a 400 when pressed.
+        """
+        for device in self.devices:
+            if device.get("id") == device_id:
+                perms = device.get("permissions") or {}
+                return set(perms.get("allowed_actions") or [])
+        return set()
+
+    def device_quiet_mode(self, device_id: str) -> bool | None:
+        """Quiet-mode state from the live snapshot."""
+        live = self.live_devices.get(device_id)
+        if not live or "quiet_mode" not in live:
+            return None
+        return bool(live.get("quiet_mode"))
+
+    def device_led_brightness(self, device_id: str) -> int | None:
+        """LED brightness (0-100) from the live snapshot."""
+        live = self.live_devices.get(device_id)
+        if not live:
+            return None
+        val = live.get("led_brightness")
+        return int(val) if val is not None else None

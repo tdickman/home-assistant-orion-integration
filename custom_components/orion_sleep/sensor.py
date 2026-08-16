@@ -13,6 +13,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -355,7 +356,6 @@ async def async_setup_entry(
                 OrionScheduleSensorEntity(coordinator, device_id, description)
             )
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
-        entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionWebSocketStateSensor(coordinator, device_id))
         for sensor_name in _TOPPER_SENSORS:
             entities.append(
@@ -367,6 +367,7 @@ async def async_setup_entry(
             entities.append(
                 OrionSensorStatusTextSensor(coordinator, device_id, sensor_name)
             )
+        entities.append(OrionLedBrightnessSensor(coordinator, device_id))
 
     async_add_entities(entities)
 
@@ -654,3 +655,40 @@ class OrionSensorStatusTextSensor(_OrionLiveSensorBase):
     @property
     def native_value(self) -> str | None:
         return self.coordinator.sensor_status_text(self._device_id, self._sensor_name)
+
+
+class OrionLedBrightnessSensor(OrionBaseEntity, SensorEntity):
+    """Control Tower LED brightness (0-100) — READ ONLY.
+
+    Briefly modelled as a `number`. Not writable: readable in the live
+    snapshot, but no write path exists anywhere we can find.
+    `POST /v1/devices/{id}/action` takes only `reboot` / `forget_wifi`
+    (measured 2026-07-26) and `PUT .../live` requires `zones`.
+
+    `led_color` {r,g,b} is likewise read-only — `DeviceAllowedAction` has
+    no colour member — which is why no `light` entity is modelled.
+    """
+
+    _attr_name = "LED Brightness"
+    _attr_icon = "mdi:brightness-6"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_led_brightness_state"
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.coordinator.device_led_brightness(self._device_id) is not None
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.device_led_brightness(self._device_id)
