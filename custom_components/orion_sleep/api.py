@@ -109,13 +109,54 @@ class OrionApiClient:
         )
         return data.get("success", False)
 
+    @staticmethod
+    def _extract_tokens(data: dict) -> dict | None:
+        """Extract normalised token dict from any known response shape.
+
+        Handles three formats:
+        1. Nested snake_case (live-verified): {"response": {"session": {"access_token": ...}}}
+        2. Flat camelCase (current spec/bytecode): {"accessToken": ..., "refreshToken": ...}
+        3. Flat snake_case (legacy flat): {"access_token": ..., "refresh_token": ...}
+
+        Returns {"access_token", "refresh_token", "expires_at"} or None.
+        """
+        # 1. Nested snake_case: response.session.access_token
+        nested = (data.get("response") or {}).get("session")
+        if isinstance(nested, dict) and "access_token" in nested:
+            return {
+                "access_token": nested["access_token"],
+                "refresh_token": nested.get("refresh_token", ""),
+                "expires_at": nested.get("expires_at", 0),
+            }
+
+        # 2. Flat camelCase: accessToken / refreshToken
+        if "accessToken" in data:
+            return {
+                "access_token": data["accessToken"],
+                "refresh_token": data.get("refreshToken", ""),
+                "expires_at": data.get("expiresAt", data.get("expires_at", 0)),
+            }
+
+        # 3. Flat snake_case: access_token / refresh_token
+        if "access_token" in data:
+            return {
+                "access_token": data["access_token"],
+                "refresh_token": data.get("refresh_token", ""),
+                "expires_at": data.get("expires_at", 0),
+            }
+
+        return None
+
     async def verify_auth_code(
         self,
         code: str,
         email: str | None = None,
         phone: str | None = None,
     ) -> dict:
-        """POST /v1/auth/verify — returns session dict with tokens.
+        """Verify a code and return normalised session tokens.
+
+        Tries POST /v1/auth/do first (current spec), then falls back to
+        POST /v1/auth/verify (legacy, verified against live API).
 
         Returns: {"access_token": ..., "refresh_token": ..., "expires_at": ...}
         """
@@ -125,20 +166,36 @@ class OrionApiClient:
         if phone:
             body["phone"] = phone
 
-        data = await self._request(
-            "POST", "/v1/auth/verify", with_auth=False, json_data=body
+        last_err: Exception | None = None
+        for path in ("/v1/auth/do", "/v1/auth/verify"):
+            _LOGGER.debug("Orion auth: trying %s", path)
+            try:
+                data = await self._request(
+                    "POST", path, with_auth=False, json_data=body
+                )
+                tokens = self._extract_tokens(data)
+                if tokens:
+                    _LOGGER.debug("Orion auth: succeeded via %s", path)
+                    return tokens
+                # Got 200 but unrecognised shape — try the next endpoint.
+                _LOGGER.debug(
+                    "Orion auth: %s returned 200 but unrecognised shape (keys: %s); trying next",
+                    path,
+                    list(data.keys()),
+                )
+                last_err = OrionAuthError(
+                    f"Unexpected auth response shape from {path}: {data}"
+                )
+            except OrionAuthError:
+                raise
+            except OrionApiError as err:
+                # Non-auth API error (e.g. 404 endpoint gone) — try next.
+                _LOGGER.debug("Orion auth: %s failed (%s); trying next endpoint", path, err)
+                last_err = err
+
+        raise OrionAuthError(
+            f"Could not complete auth via any known endpoint: {last_err}"
         )
-
-        # Extract session from nested response structure
-        session = (data.get("response") or {}).get("session")
-        if not session or "access_token" not in session:
-            raise OrionAuthError(f"Unexpected verify response shape: {data}")
-
-        return {
-            "access_token": session["access_token"],
-            "refresh_token": session["refresh_token"],
-            "expires_at": session.get("expires_at", 0),
-        }
 
     # ── Token management ──────────────────────────────────────────────
 
@@ -153,25 +210,39 @@ class OrionApiClient:
         await self._refresh_tokens()
 
     async def _refresh_tokens(self) -> None:
-        """POST /v1/auth/refresh — refresh the access token."""
+        """POST /v1/auth/refresh — refresh the access token.
+
+        Sends both refreshToken (current spec) and refresh_token (legacy)
+        so the request works regardless of which key the live API requires.
+        Response is parsed by _extract_tokens which handles all known shapes.
+        """
         if not self._refresh_token:
             raise OrionAuthError("No refresh token available")
 
+        _LOGGER.debug("Orion: refreshing access token")
         data = await self._request(
             "POST",
             "/v1/auth/refresh",
             with_auth=False,
-            json_data={"refresh_token": self._refresh_token},
+            json_data={
+                "refreshToken": self._refresh_token,
+                "refresh_token": self._refresh_token,
+            },
         )
 
-        # Handle both nested (response.session) and top-level response shapes
-        session = (data.get("response") or {}).get("session", data)
-        if "access_token" not in session:
+        tokens = self._extract_tokens(data)
+        if not tokens:
+            _LOGGER.warning(
+                "Orion token refresh: response did not contain recognised token fields "
+                "(top-level keys: %s) — re-authentication is likely required",
+                list(data.keys()),
+            )
             raise OrionAuthError(f"Unexpected refresh response shape: {data}")
 
-        self._access_token = session["access_token"]
-        self._refresh_token = session["refresh_token"]
-        self._expires_at = session.get("expires_at", 0)
+        self._access_token = tokens["access_token"]
+        self._refresh_token = tokens["refresh_token"]
+        self._expires_at = tokens.get("expires_at", 0)
+        _LOGGER.debug("Orion: token refreshed successfully")
 
         if self._token_refresh_callback:
             self._token_refresh_callback(

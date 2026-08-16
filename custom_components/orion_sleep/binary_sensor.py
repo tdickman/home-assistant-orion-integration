@@ -9,6 +9,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -42,6 +43,8 @@ async def async_setup_entry(
             entities.append(
                 OrionSensorOnBedBinarySensor(coordinator, device_id, sensor_name)
             )
+
+        entities.append(OrionProblemBinarySensor(coordinator, device_id))
 
     async_add_entities(entities)
 
@@ -123,3 +126,43 @@ class OrionSensorOnBedBinarySensor(OrionBaseEntity, BinarySensorEntity):
             self.coordinator.sensor_status_text(self._device_id, self._sensor_name)
             is not None
         )
+
+
+class OrionProblemBinarySensor(OrionBaseEntity, BinarySensorEntity):
+    """Diagnostic sensor that fires when the device reports a safety error."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "device_problem"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_problem"
+
+    @property
+    def is_on(self) -> bool | None:
+        live = self.coordinator.live_devices.get(self._device_id)
+        if not live:
+            return None
+        safety = (live.get("status") or {}).get("safety")
+        if not isinstance(safety, dict):
+            return False
+        if safety.get("error"):
+            return True
+        codes = safety.get("error_codes")
+        return bool(codes) if isinstance(codes, list) else False
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        live = self.coordinator.live_devices.get(self._device_id)
+        if not live:
+            return None
+        safety = (live.get("status") or {}).get("safety")
+        if not isinstance(safety, dict):
+            return None
+        codes = safety.get("error_codes")
+        return {"error_codes": codes} if codes else None

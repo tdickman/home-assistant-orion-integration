@@ -8,15 +8,18 @@ import logging
 from typing import Any
 
 from homeassistant.components.sensor import (
+    SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import CONF_ZONE_LEFT, DEFAULT_ZONE_LEFT
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -50,13 +53,6 @@ def _get_breath_rate(session: dict | None) -> dict:
     if not session:
         return {}
     return session.get("breath_rate", {})
-
-
-def _get_hrv(session: dict | None) -> dict:
-    """Get hrv from a session."""
-    if not session:
-        return {}
-    return session.get("hrv", {})
 
 
 def _get_movement(session: dict | None) -> dict:
@@ -101,25 +97,6 @@ def _score_quality(score: float | int | None) -> str | None:
     return "Poor"
 
 
-def _get_score(coordinator_data: dict) -> float | None:
-    """Get the most recent sleep score from insights overview."""
-    insights = coordinator_data.get("insights", {})
-    overview = insights.get("overview", {})
-    if not overview:
-        # Fall back to data entries
-        data = insights.get("data", {})
-        for date_key in sorted(data.keys(), reverse=True):
-            score = data[date_key].get("score")
-            if score is not None:
-                return score
-        return None
-    for date_key in sorted(overview.keys(), reverse=True):
-        score = overview[date_key].get("score")
-        if score is not None:
-            return score
-    return None
-
-
 # ── Sensor descriptions ───────────────────────────────────────────────────
 
 
@@ -138,15 +115,6 @@ class OrionSensorEntityDescription(SensorEntityDescription):
 # Instead we format the values ourselves as human-friendly strings (7h 53m).
 
 INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
-    OrionSensorEntityDescription(
-        key="sleep_score",
-        translation_key="sleep_score",
-        native_unit_of_measurement="points",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:medal-outline",
-        value_fn=lambda session: None,  # handled specially in the entity
-        extra_attrs_fn=lambda session: {},  # handled specially in the entity
-    ),
     OrionSensorEntityDescription(
         key="total_sleep_time",
         translation_key="total_sleep_time",
@@ -221,18 +189,6 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
                 and _get_breath_rate(session).get("max") is not None
                 else None
             ),
-        },
-    ),
-    OrionSensorEntityDescription(
-        key="hrv",
-        translation_key="hrv",
-        native_unit_of_measurement="ms",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:heart-flash",
-        value_fn=lambda session: _get_hrv(session).get("average"),
-        extra_attrs_fn=lambda session: {
-            "min": _get_hrv(session).get("min"),
-            "max": _get_hrv(session).get("max"),
         },
     ),
     OrionSensorEntityDescription(
@@ -342,6 +298,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up Orion Sleep sensor entities."""
     coordinator: OrionDataUpdateCoordinator = entry.runtime_data
+
+    zone_left = entry.options.get(CONF_ZONE_LEFT, DEFAULT_ZONE_LEFT)
+    zone_right = "zone_b" if zone_left == "zone_a" else "zone_a"
+    zone_sides = [(zone_left, "left"), (zone_right, "right")]
+
     entities: list[SensorEntity] = []
 
     for device in coordinator.devices:
@@ -355,7 +316,6 @@ async def async_setup_entry(
                 OrionScheduleSensorEntity(coordinator, device_id, description)
             )
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
-        entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionWebSocketStateSensor(coordinator, device_id))
         for sensor_name in _TOPPER_SENSORS:
             entities.append(
@@ -366,6 +326,19 @@ async def async_setup_entry(
             )
             entities.append(
                 OrionSensorStatusTextSensor(coordinator, device_id, sensor_name)
+            )
+        for zone_id, side in zone_sides:
+            entities.append(
+                OrionMeasuredZoneTempSensor(coordinator, device_id, zone_id, side)
+            )
+            entities.append(
+                OrionZoneThermalStateSensor(coordinator, device_id, zone_id, side)
+            )
+            entities.append(
+                OrionZoneSleepScoreSensor(coordinator, device_id, zone_id, side)
+            )
+            entities.append(
+                OrionZoneHrvSensor(coordinator, device_id, zone_id, side)
             )
 
     async_add_entities(entities)
@@ -395,10 +368,6 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
         if not self.coordinator.data:
             return None
 
-        # Sleep score is special — comes from overview, not session
-        if self.entity_description.key == "sleep_score":
-            return _get_score(self.coordinator.data)
-
         session = self.coordinator.get_latest_session()
         return self.entity_description.value_fn(session)
 
@@ -406,14 +375,6 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any] | None:
         """Return extra state attributes."""
         if not self.coordinator.data:
-            return None
-
-        # Sleep score gets the quality rating
-        if self.entity_description.key == "sleep_score":
-            score = _get_score(self.coordinator.data)
-            quality = _score_quality(score)
-            if quality:
-                return {"quality_rating": quality}
             return None
 
         if self.entity_description.extra_attrs_fn is None:
@@ -654,3 +615,160 @@ class OrionSensorStatusTextSensor(_OrionLiveSensorBase):
     @property
     def native_value(self) -> str | None:
         return self.coordinator.sensor_status_text(self._device_id, self._sensor_name)
+
+
+class OrionMeasuredZoneTempSensor(OrionBaseEntity, SensorEntity):
+    """Real-time measured bed temperature for one zone from the WS stream.
+
+    Reads ``status.zones[].temp`` from the live_device payload — the actual
+    temperature the hardware measures, updated every ~2s via WebSocket.
+    Distinct from the zone setpoint (``zones[].temp``) returned by
+    ``get_zone_live()``.
+    """
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:thermometer"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        zone_id: str,
+        side: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._zone_id = zone_id
+        self._attr_unique_id = f"{device_id}_{zone_id}_measured_temp"
+        self._attr_translation_key = f"measured_temp_{side}"
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.get_zone_measured(self._device_id, self._zone_id) is not None
+
+    @property
+    def native_value(self) -> float | None:
+        zone = self.coordinator.get_zone_measured(self._device_id, self._zone_id)
+        if zone is None:
+            return None
+        temp = zone.get("temp")
+        return float(temp) if temp is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        zone = self.coordinator.get_zone_measured(self._device_id, self._zone_id)
+        if not zone:
+            return None
+        thermal_state = zone.get("thermal_state")
+        return {"thermal_state": thermal_state} if thermal_state is not None else None
+
+
+class OrionZoneThermalStateSensor(OrionBaseEntity, SensorEntity):
+    """Thermal operating state for one zone (standby / heating / cooling).
+
+    Reads ``status.zones[].thermal_state`` from the live WS payload.
+    Only ``standby`` has been observed in captures; ``heating`` and
+    ``cooling`` are expected but unconfirmed.
+    """
+
+    _attr_icon = "mdi:thermometer-auto"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        zone_id: str,
+        side: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._zone_id = zone_id
+        self._attr_unique_id = f"{device_id}_{zone_id}_thermal_state"
+        self._attr_translation_key = f"thermal_state_{side}"
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.get_zone_measured(self._device_id, self._zone_id) is not None
+
+    @property
+    def native_value(self) -> str | None:
+        zone = self.coordinator.get_zone_measured(self._device_id, self._zone_id)
+        if zone is None:
+            return None
+        return zone.get("thermal_state")
+
+
+class OrionZoneSleepScoreSensor(OrionBaseEntity, SensorEntity):
+    """Sleep score for one side of the bed.
+
+    Reads the ``score`` from that zone's most recent sleep session so a
+    two-person bed gets a distinct left- and right-side score, instead of
+    the single account-level score the app shows in its overview. The
+    ``quality_rating`` attribute mirrors the app's Excellent/Good/Fair/Poor
+    label.
+    """
+
+    _attr_native_unit_of_measurement = "points"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:medal-outline"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        zone_id: str,
+        side: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._zone_id = zone_id
+        self._attr_unique_id = f"{device_id}_{zone_id}_sleep_score"
+        self._attr_translation_key = f"sleep_score_{side}"
+
+    def _score(self) -> float | None:
+        session = self.coordinator.get_latest_session_for_zone(self._zone_id)
+        if not session:
+            return None
+        return session.get("score")
+
+    @property
+    def native_value(self) -> float | None:
+        return self._score()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        quality = _score_quality(self._score())
+        return {"quality_rating": quality} if quality else None
+
+
+class OrionZoneHrvSensor(OrionBaseEntity, SensorEntity):
+    """Heart-rate variability for one side of the bed.
+
+    Reads the current HRV value from that zone's most recent sleep session
+    so each side of a two-person bed gets its own entity. We surface the
+    single value the API reports (``hrv.average``) rather than min/max — at
+    the polling cadence this tracks the latest reading closely enough for
+    graphing and automations.
+    """
+
+    _attr_native_unit_of_measurement = "ms"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:heart-flash"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        zone_id: str,
+        side: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._zone_id = zone_id
+        self._attr_unique_id = f"{device_id}_{zone_id}_hrv"
+        self._attr_translation_key = f"hrv_{side}"
+
+    @property
+    def native_value(self) -> float | None:
+        session = self.coordinator.get_latest_session_for_zone(self._zone_id)
+        if not session:
+            return None
+        return session.get("hrv", {}).get("average")

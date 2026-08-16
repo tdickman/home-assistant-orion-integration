@@ -54,8 +54,8 @@ https://api1.orionbed.com
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | POST | `/v1/auth/code` | No | Send verification code to email/phone |
-| POST | `/v1/auth/verify` | No | Verify code, get tokens. Response nested: `response.session.{access_token, refresh_token, expires_at}` |
-| POST | `/v1/auth/refresh` | No | Refresh tokens. Body: `{"refresh_token": "..."}`. Response may be nested or top-level. |
+| POST | `/v1/auth/do` **or** `/v1/auth/verify` | No | Verify code, get tokens. The spec now documents `/v1/auth/do` (from Android bytecode); the previously live-verified endpoint was `/v1/auth/verify`. Code tries `/v1/auth/do` first and falls back to `/v1/auth/verify`. Response handled in all known shapes — see `_extract_tokens`. |
+| POST | `/v1/auth/refresh` | No | Refresh tokens. Body sends both `refreshToken` (current spec) and `refresh_token` (legacy) so the request works regardless of which key the live API requires. Response handled by `_extract_tokens`. |
 | GET | `/v1/auth/me` | Bearer | User profile. Wrapped in `{"response": {...}, "success": true}` |
 | GET | `/v1/devices` | Bearer | Devices at `response.devices[]`. Fields: `id`, `serial_number`, `name`, `model`, `zones[]`, `temperature_range`, `temperature_scale` |
 | GET | `/v1/sleep-schedules` | Bearer | Schedules at `response.schedules.{user_id}[]` (7 days). Also `today_sleep_schedule.{user_id}` |
@@ -108,8 +108,9 @@ https://api1.orionbed.com
 
 ### Key Gotchas
 
-- Token fields are **snake_case** (`access_token`, NOT `accessToken`)
-- Refresh response may be nested (`response.session`) or flat — handle both
+- Token fields were **snake_case** (`access_token`) when verified against the live API, but the current OpenAPI spec (from Android bytecode) shows **camelCase** (`accessToken`). `_extract_tokens` in `api.py` handles all three known shapes: nested-snake, flat-camelCase, flat-snake.
+- The auth verification endpoint was `/v1/auth/verify` when live-verified; the spec now says `/v1/auth/do`. Code tries both.
+- Refresh request body similarly sends both `refreshToken` (spec) and `refresh_token` (legacy) keys.
 - Token expiry uses `expires_at` Unix timestamp, NOT JWT parsing
 - Insights endpoint (`/v2/insights`) does NOT wrap in `response` — it's top-level
 - All other endpoints wrap data in `{"response": {...}, "success": true}`
@@ -176,8 +177,8 @@ Entities read from coordinator:
 
 | Platform | Entity | Key / unique_id suffix | Data Source |
 |----------|--------|----------------------|-------------|
-| Climate | Bed Climate | `_climate` | Target temp from `today_sleep_schedule.bedtime_temp`, current from latest session `temperature.values[-1]` |
-| Sensor | Sleep Score | `_sleep_score` | `insights.overview.{latest_date}.score` with `quality_rating` extra attr |
+| Climate | Bed Climate | `_climate` | Target temp from live setpoint `zones[].temp`; current temp from live measured `status.zones[].temp` (WS, ~2s) |
+| Sensor | Sleep Score Left / Right | `_{zone_id}_sleep_score` | per-zone `session.score` (via `get_latest_session_for_zone`) with `quality_rating` extra attr |
 | Sensor | Total Sleep Time | `_total_sleep_time` | `session.sleep_summary.time_asleep` (formatted as "Xh Ym") |
 | Sensor | Deep Sleep Time | `_deep_sleep_time` | `session.sleep_summary.deep_sleep` |
 | Sensor | REM Sleep Time | `_rem_sleep_time` | `session.sleep_summary.rem_sleep` |
@@ -185,7 +186,7 @@ Entities read from coordinator:
 | Sensor | Awake Time | `_awake_time` | `session.sleep_summary.awake_time` |
 | Sensor | Heart Rate Average | `_heart_rate_avg` | `session.heart_rate.average` + min/max/range extra attrs |
 | Sensor | Breath Rate | `_breath_rate` | `session.breath_rate.average` + min/max/range extra attrs |
-| Sensor | HRV | `_hrv` | `session.hrv.average` + min/max extra attrs |
+| Sensor | HRV Left / Right | `_{zone_id}_hrv` | per-zone `session.hrv.average` (via `get_latest_session_for_zone`), current value only |
 | Sensor | Body Movement Rate | `_body_movement_rate` | `session.movement.movement_rate` |
 | Sensor | Restless Time | `_restless_time` | `session.movement.total_seconds` (formatted as "Xm Ys") |
 | Sensor | Bedtime | `_bedtime` | `today_sleep_schedule.bedtime` (HH:mm) |
@@ -193,11 +194,13 @@ Entities read from coordinator:
 | Sensor | Schedule Duration | `_schedule_duration` | Calculated from bedtime/wakeup (handles overnight) |
 | Sensor | Bedtime Temperature | `_bedtime_temp` | `today_sleep_schedule.bedtime_temp` + phase/smart temp extra attrs |
 | Sensor | Wake-up Temperature | `_wakeup_temp` | `today_sleep_schedule.wakeup_temp` |
-| Sensor | Current Temp Offset | `_current_temp_offset` | Latest session `temperature.values[-1]` converted to app-style offset. **Registered twice (pre-existing bug), see Known Issues.** |
+| Sensor | Current Temp Offset | `_current_temp_offset` | Latest session `temperature.values[-1]` converted to app-style offset. |
 | Sensor (diag) | Live Connection | `_websocket_state` | WS connection state (`connecting`/`connected`/`reconnecting`/`device_offline`/`auth_failed`/`stopped`) plus `seconds_since_last_message` extra attr |
 | Sensor | Sensor 1/2 Heart Rate | `_sensorN_live_heart_rate` | WS `status.sensors.sensorN.heart_rate` (bpm). `0` (empty bed) and `255` (no reading yet) both mapped to `None`. |
 | Sensor | Sensor 1/2 Breath Rate | `_sensorN_live_breath_rate` | WS `status.sensors.sensorN.breath_rate` (br/min). Same sentinel handling. |
 | Sensor (diag) | Sensor 1/2 Status | `_sensorN_sensor_status` | Raw `status_text`: observed `left_bed` (empty) and `normal` (occupied). |
+| Sensor | Left/Right Bed Temperature | `_{zone_id}_measured_temp` | `status.zones[].temp` from WS — actual measured bed temp in °C, updated every ~2s. `thermal_state` exposed as extra attribute. |
+| Sensor | Left/Right Thermal State | `_{zone_id}_thermal_state` | `status.zones[].thermal_state` from WS — `standby` observed; `heating`/`cooling` expected but unconfirmed. |
 | Binary Sensor | Sleep Session Active | `_session_active` | `session.is_in_progress` (shows "Asleep" / "Not asleep") |
 | Binary Sensor | Sensor 1/2 On Bed | `_sensorN_on_bed` | Occupancy device class. `status_text != "left_bed"`. The WS push itself is realtime, but the topper takes ~30s–1min to decide someone has sat down or left, so `status_text` transitions lag the real event. |
 | Switch | Power | `_power` | On = all zones on, Off = all zones off. Uses `PUT /v1/devices/{id}/live` (canonical power primitive). State read from each zone's `on`/`is_on` field. |
@@ -208,9 +211,9 @@ Entities read from coordinator:
 | Number | Asleep Phase 2 Offset | `_phase_2_temp_offset` | As above, `phase_2_temp` field. |
 | Number | Wake Up Temperature Offset | `_wakeup_temp_offset` | As above, `wakeup_temp` field. |
 
-**Per device: 1 climate + 4 number + 24 sensors + 3 binary sensors + 3 switches = 35 entities**
+**Per device: 1 climate + 4 number + 28 sensors + 3 binary sensors + 3 switches = 39 entities**
 
-- 24 sensors = 11 insights + 5 schedule + 1 current-temp-offset + 1 live-connection + 6 per-sensor live (2× HR + 2× BR + 2× diag status_text). The current-temp-offset is accidentally registered twice (same unique_id, HA keeps one) — the 24 count reflects the logical set.
+- 28 sensors = 11 insights + 5 schedule + 1 current-temp-offset + 1 live-connection + 6 per-sensor live (2× HR + 2× BR + 2× diag status_text) + 4 zone live (2× measured temp + 2× thermal state).
 - 4 number sliders: one per schedule-phase temperature offset (bedtime / phase_1 / phase_2 / wakeup).
 - 3 binary sensors: Sleep Session Active + 2× On Bed (sensor1/sensor2).
 - 3 switches: Power, Away Mode, Sleep Schedule.
@@ -232,7 +235,9 @@ Entities read from coordinator:
 ### Token Management
 - `_token_expired(margin_seconds=60)` — checks `time.time() + 60` against `expires_at`
 - `ensure_valid_token()` — auto-refreshes if expired
-- `_refresh_tokens()` — handles both nested (`response.session`) and flat response shapes
+- `_extract_tokens(data)` — static helper; normalises token response from nested-snake, flat-camelCase, or flat-snake shapes
+- `_refresh_tokens()` — sends both `refreshToken` and `refresh_token` body keys; parses response via `_extract_tokens`
+- `verify_auth_code()` — tries `/v1/auth/do` then `/v1/auth/verify`; parses response via `_extract_tokens`
 - `set_token_refresh_callback(callback)` — called after successful refresh to persist tokens
 
 ### Action Methods
@@ -337,14 +342,13 @@ Notable:
 
 ## Known Issues
 
-- **Duplicate entity**: `OrionCurrentTempOffsetSensor` is appended twice per device in `sensor.py:351-352` (same `unique_id`, HA will reject or warn about the second)
 - **Unused translations**: `bed_climate_left` and `bed_climate_right` defined in strings.json but no entities use them
 
 ## Known Limitations / Future Work
 
 - `set_temperature` endpoint not verified against live API
 - Schedule enable/disable (`PUT /v1/sleep-schedules?action=enable`) not verified
-- `async_set_hvac_mode(OFF)` and `async_turn_off()` on climate entity are no-ops (schedule-based control only)
+- `async_set_hvac_mode(OFF)` turns the zone off immediately; it does not disable the schedule, so the device may turn itself back on at the next scheduled bedtime
 - Firmware versions are not exposed as dedicated entities yet (available in the WS payload at `status.firmware.{cb,ib}` and on each sensor block's `firmware_version` — plumb through if surfacing them becomes useful)
 - HRV values frequently null in real data
 - No way to start/stop sleep sessions via API

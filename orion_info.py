@@ -115,48 +115,87 @@ def request_code(email: str | None = None, phone: str | None = None) -> bool:
     return True
 
 
+def _extract_tokens(data: dict) -> dict | None:
+    """Normalise tokens from any known response shape.
+
+    Handles:
+    1. Nested snake_case (live-verified): {"response": {"session": {"access_token": ...}}}
+    2. Flat camelCase (current spec/bytecode): {"accessToken": ..., "refreshToken": ...}
+    3. Flat snake_case (legacy flat): {"access_token": ..., "refresh_token": ...}
+    """
+    nested = (data.get("response") or {}).get("session")
+    if isinstance(nested, dict) and "access_token" in nested:
+        return {
+            "access_token": nested["access_token"],
+            "refresh_token": nested.get("refresh_token", ""),
+            "expires_at": nested.get("expires_at", 0),
+        }
+    if "accessToken" in data:
+        return {
+            "access_token": data["accessToken"],
+            "refresh_token": data.get("refreshToken", ""),
+            "expires_at": data.get("expiresAt", data.get("expires_at", 0)),
+        }
+    if "access_token" in data:
+        return {
+            "access_token": data["access_token"],
+            "refresh_token": data.get("refresh_token", ""),
+            "expires_at": data.get("expires_at", 0),
+        }
+    return None
+
+
 def verify_code(
     code: str,
     email: str | None = None,
     phone: str | None = None,
 ) -> dict | None:
-    """POST /v1/auth/verify — returns the session dict or None on failure.
+    """Verify auth code — tries POST /v1/auth/do then /v1/auth/verify.
 
-    Real response shape:
-        {"response": {"session": {access_token, refresh_token, expires_at, ...},
-                       "user": {...}},
-         "success": true}
+    The current spec documents /v1/auth/do; the live-verified endpoint was
+    /v1/auth/verify. We try both so the script works against either API version.
+
+    Returns the normalised session dict or None on failure.
     """
     body: dict = {"code": code}
     if email:
         body["email"] = email
     if phone:
         body["phone"] = phone
-    resp = requests.post(_url("/v1/auth/verify"), json=body, headers=_headers())
-    data = _check(resp, "verify_code")
-    if data is None:
-        return None
-    # Extract session from the nested response
-    session = (data.get("response") or {}).get("session")
-    if not session or "access_token" not in session:
-        print(f"[ERROR] Unexpected verify response: {json.dumps(data, indent=2)}")
-        return None
-    return session
+
+    for path in ("/v1/auth/do", "/v1/auth/verify"):
+        resp = requests.post(_url(path), json=body, headers=_headers())
+        if not resp.ok:
+            if resp.status_code == 404:
+                continue  # endpoint gone — try the next one
+            _check(resp, f"verify_code ({path})")
+            return None
+        data = resp.json()
+        session = _extract_tokens(data)
+        if session:
+            return session
+        print(f"[WARN] {path} returned 200 but unrecognised shape; trying next")
+
+    print("[ERROR] Could not verify code via any known endpoint")
+    return None
 
 
 def refresh_tokens(refresh_token: str) -> dict | None:
-    """POST /v1/auth/refresh — returns a new session dict or None."""
+    """POST /v1/auth/refresh — returns a new session dict or None.
+
+    Sends both refreshToken (current spec) and refresh_token (legacy) so
+    the request works regardless of which key the live API requires.
+    """
     resp = requests.post(
         _url("/v1/auth/refresh"),
-        json={"refresh_token": refresh_token},
+        json={"refreshToken": refresh_token, "refresh_token": refresh_token},
         headers=_headers(),
     )
     data = _check(resp, "refresh_tokens")
     if data is None:
         return None
-    # Try same nested structure as verify; fall back to top-level
-    session = (data.get("response") or {}).get("session", data)
-    if "access_token" not in session:
+    session = _extract_tokens(data)
+    if not session:
         print(f"[ERROR] Unexpected refresh response: {json.dumps(data, indent=2)}")
         return None
     return session

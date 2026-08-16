@@ -1847,68 +1847,154 @@ components:
     InsightsResponse:
       type: object
       description: |
-        Sleep insights data. Transformed by the app's transformInsightsResponse
-        function before display.
+        Live-verified response shape from GET /v2/insights.
+        NOT wrapped in a "response" key (unlike most endpoints).
+        score lives at the day level, not inside each session.
       properties:
-        dailySleepInsights:
-          type: array
-          items:
-            $ref: "#/components/schemas/DailySleepInsight"
+        user_id:
+          type: string
+          format: uuid
+        data:
+          type: object
+          description: |
+            Date-keyed map of daily insight objects. Keys are ISO 8601 dates
+            (YYYY-MM-DD). Each day may contain zero or more sessions.
+          additionalProperties:
+            $ref: "#/components/schemas/DailyInsight"
+        overview:
+          type: object
+          description: |
+            Condensed date-keyed score summary. Covers a shorter window than
+            `data` (observed: 5 days vs 7+ days). Use `data[date].score` for
+            the authoritative score.
+          additionalProperties:
+            type: object
+            properties:
+              score:
+                type: integer
+                nullable: true
+              quality:
+                type: string
+                nullable: true
+                example: "Good"
+              color:
+                type: string
+                nullable: true
+                example: "positive"
 
-    DailySleepInsight:
+    DailyInsight:
       type: object
       properties:
         date:
           type: string
           format: date
+        score:
+          type: integer
+          nullable: true
+          description: |
+            Day-level sleep score (0–100). Lives here, NOT inside sessions.
+            The integration reads this field and attaches it to the matching
+            session when returning per-zone data.
+        quality:
+          type: string
+          nullable: true
+          example: "Good"
+        color:
+          type: string
+          nullable: true
+          example: "positive"
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/SleepSession"
+
+    SleepSession:
+      type: object
+      description: |
+        One sleep session for a single zone. The score is NOT present here —
+        it is on the parent DailyInsight object.
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        zone_id:
+          type: string
+          example: "zone_a"
+        is_in_progress:
+          type: boolean
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        sleep_summary:
+          type: object
+          properties:
+            time_asleep:
+              type: number
+              description: Total time asleep in minutes
+            deep_sleep:
+              type: number
+              description: Deep sleep in minutes
+            rem_sleep:
+              type: number
+              description: REM sleep in minutes
+            light_sleep:
+              type: number
+              description: Light sleep in minutes
+            awake_time:
+              type: number
+              description: Awake time in minutes
+        heart_rate:
+          type: object
+          properties:
+            average:
+              type: number
+            min:
+              type: number
+            max:
+              type: number
+        breath_rate:
+          type: object
+          properties:
+            average:
+              type: number
+            min:
+              type: number
+            max:
+              type: number
         hrv:
           type: object
-          description: Heart Rate Variability metrics
           properties:
-            value:
+            average:
               type: number
-              format: float
-        breathRate:
-          type: object
-          description: Breath rate metrics
-          properties:
-            value:
+              description: Average HRV in ms
+            min:
               type: number
-              format: float
-        bodyMovement:
-          type: object
-          description: Body movement metrics
-          properties:
-            rate:
+            max:
               type: number
-              format: float
-            restlessTime:
-              type: number
-              description: Restless time in minutes
-            leftBed:
-              type: integer
-              description: Number of times the user left bed
-        sleepScore:
-          type: number
-          format: float
-        totalSleepTime:
-          type: number
-          description: Total sleep time in minutes
-        sleepStages:
+        movement:
           type: object
           properties:
-            awake:
+            movement_rate:
               type: number
-              description: Time awake in minutes
-            light:
+              description: Movements per hour
+            total_seconds:
               type: number
-              description: Time in light sleep in minutes
-            deep:
-              type: number
-              description: Time in deep sleep in minutes
-            rem:
-              type: number
-              description: Time in REM sleep in minutes
+              description: Total restless time in seconds
+        user:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            first_name:
+              type: string
+            last_name:
+              type: string
+            email:
+              type: string
 
     NotificationPreferences:
       type: object

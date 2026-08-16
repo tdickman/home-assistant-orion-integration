@@ -52,7 +52,41 @@
         "title": "Orion Sleep Options",
         "data": {
           "scan_interval": "Polling interval (seconds)",
-          "insights_days": "Days of sleep insights to fetch"
+          "insights_days": "Days of sleep insights to fetch",
+          "zone_left": "Left side zone",
+          "partner_action": "Partner account"
+        },
+        "data_description": {
+          "zone_left": "Which physical zone is on the left side of the bed. Change this if left and right entities are swapped.",
+          "partner_action": "Add a second Orion account to show sleep data for the other side of the bed."
+        }
+      },
+      "partner_method": {
+        "title": "Partner Account Login",
+        "description": "Choose how the partner logs in to their Orion Sleep account.",
+        "data": {
+          "auth_method": "Login method"
+        }
+      },
+      "partner_email": {
+        "title": "Partner Account Login",
+        "description": "Enter the partner's Orion Sleep email. A verification code will be sent to them.",
+        "data": {
+          "email": "Email address"
+        }
+      },
+      "partner_phone": {
+        "title": "Partner Account Login",
+        "description": "Enter the partner's Orion Sleep phone number. Must be 11 digits, ex: 15552221234.",
+        "data": {
+          "phone": "Phone number"
+        }
+      },
+      "partner_verify": {
+        "title": "Partner Verification Code",
+        "description": "Enter the verification code sent to the partner's phone or email.",
+        "data": {
+          "code": "Verification code"
         }
       }
     }
@@ -82,6 +116,14 @@
       },
       "sensor2_on_bed": {
         "name": "Sensor 2 On Bed"
+      },
+      "device_problem": {
+        "name": "Problem"
+      }
+    },
+    "button": {
+      "reboot": {
+        "name": "Reboot"
       }
     },
     "switch": {
@@ -110,8 +152,11 @@
       }
     },
     "sensor": {
-      "sleep_score": {
-        "name": "Sleep Score"
+      "sleep_score_left": {
+        "name": "Sleep Score Left"
+      },
+      "sleep_score_right": {
+        "name": "Sleep Score Right"
       },
       "total_sleep_time": {
         "name": "Total Sleep Time"
@@ -134,8 +179,11 @@
       "breath_rate": {
         "name": "Breath Rate"
       },
-      "hrv": {
-        "name": "HRV"
+      "hrv_left": {
+        "name": "HRV Left"
+      },
+      "hrv_right": {
+        "name": "HRV Right"
       },
       "body_movement_rate": {
         "name": "Body Movement Rate"
@@ -189,6 +237,18 @@
       },
       "sensor2_status_text": {
         "name": "Sensor 2 Status"
+      },
+      "measured_temp_left": {
+        "name": "Left Bed Temperature"
+      },
+      "measured_temp_right": {
+        "name": "Right Bed Temperature"
+      },
+      "thermal_state_left": {
+        "name": "Left Thermal State"
+      },
+      "thermal_state_right": {
+        "name": "Right Thermal State"
       }
     }
   }

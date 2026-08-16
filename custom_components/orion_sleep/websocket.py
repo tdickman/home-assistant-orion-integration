@@ -23,6 +23,7 @@ This module implements one WS connection per device, with:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import ssl
 import time
@@ -243,12 +244,20 @@ class OrionWebSocketClient:
         try:
             await self._api_client.ensure_valid_token()
         except OrionAuthError as err:
-            _LOGGER.warning("Orion WS cannot connect for %s: %s", self._serial, err)
+            _LOGGER.warning(
+                "Orion WS: cannot connect for /device/%s — auth failed, "
+                "re-authentication required: %s",
+                self._serial,
+                err,
+            )
             self._set_state(OrionWsState.AUTH_FAILED)
             return
 
         token = self._api_client._access_token  # noqa: SLF001
         if not token:
+            _LOGGER.warning(
+                "Orion WS: no access token available for /device/%s", self._serial
+            )
             self._set_state(OrionWsState.AUTH_FAILED)
             return
 
@@ -274,13 +283,19 @@ class OrionWebSocketClient:
             # 401 -> token probably expired mid-flight. Force a refresh and
             # let the outer loop reconnect on the next iteration.
             if err.status == 401:
-                _LOGGER.debug(
-                    "Orion WS 401 on /device/%s; refreshing token",
+                _LOGGER.warning(
+                    "Orion WS: 401 on /device/%s — token expired, refreshing",
                     self._serial,
                 )
                 try:
                     await self._api_client._refresh_tokens()  # noqa: SLF001
-                except OrionAuthError:
+                except OrionAuthError as refresh_err:
+                    _LOGGER.warning(
+                        "Orion WS: token refresh failed for /device/%s — "
+                        "WebSocket disabled until re-authentication: %s",
+                        self._serial,
+                        refresh_err,
+                    )
                     self._set_state(OrionWsState.AUTH_FAILED)
                     return
                 # Short-circuit the backoff for a 401 — we just refreshed.
@@ -346,8 +361,6 @@ class OrionWebSocketClient:
         """Parse and dispatch one text frame."""
         self._last_message_at = time.monotonic()
         try:
-            import json
-
             parsed = json.loads(data)
         except ValueError:
             _LOGGER.debug(

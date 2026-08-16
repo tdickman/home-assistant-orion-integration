@@ -11,7 +11,7 @@ Custom [Home Assistant](https://www.home-assistant.io/) integration for the **Or
 - **Live heart rate and breath rate** — Per-sensor realtime readings from the topper (distinct from the post-session averages).
 - **Climate control** — Target bed temperature per-zone, with the current measured temperature pulled from the latest session.
 - **Power and presence switches** — One-click power via the canonical `/v1/devices/{serial}/live` endpoint, plus an Away Mode switch that reads the authoritative presence signal from `zones[*].user`.
-- **Sleep insight sensors** — Sleep score, HRV, heart rate, breath rate, sleep-stage durations (awake / light / deep / REM), total time asleep, restless time, and body-movement rate for your most recent session.
+- **Sleep insight sensors** — Per-side sleep score and HRV (left / right), plus heart rate, breath rate, sleep-stage durations (awake / light / deep / REM), total time asleep, restless time, and body-movement rate for your most recent session.
 - **Schedule sensors and sliders** — Today's bedtime, wake-up time, duration, and target temperatures, plus Number sliders for adjusting the four schedule-phase temperature offsets (-10 … +10, app-style).
 - **Session tracking** — Binary sensor showing whether a sleep session is currently in progress.
 - **Diagnostic entity** — Live-connection state sensor (`connecting` / `connected` / `reconnecting` / `device_offline` / `auth_failed`), with the seconds-since-last-frame exposed as an attribute.
@@ -106,7 +106,7 @@ App-style offsets (-10 to +10) that map non-linearly to Celsius using the device
 
 | Entity | Unit | Source |
 |---|---|---|
-| Sleep Score | points | `insights.overview[latest].score` with a `quality_rating` attribute (Excellent / Good / Fair / Poor) |
+| Sleep Score Left / Right | points | per-side `score` from that zone's latest session, with a `quality_rating` attribute (Excellent / Good / Fair / Poor) |
 | Total Sleep Time | formatted `Xh Ym` | `sleep_summary.time_asleep` |
 | Deep Sleep | formatted `Xh Ym` | `sleep_summary.deep_sleep` |
 | REM Sleep | formatted `Xh Ym` | `sleep_summary.rem_sleep` |
@@ -114,7 +114,7 @@ App-style offsets (-10 to +10) that map non-linearly to Celsius using the device
 | Awake Time | formatted `Xh Ym` | `sleep_summary.awake_time` |
 | Heart Rate | bpm | `heart_rate.average` plus `min` / `max` / `range` attributes |
 | Breath Rate | breaths/min | `breath_rate.average` plus `min` / `max` / `range` attributes |
-| HRV | ms | `hrv.average` plus `min` / `max` attributes (often null in real data) |
+| HRV Left / Right | ms | per-side `hrv.average` from that zone's latest session (often null in real data) |
 | Body Movement Rate | /hr | `movement.movement_rate` |
 | Restless Time | formatted `Xm Ys` | `movement.total_seconds` |
 
@@ -176,7 +176,8 @@ The raw `status_text`, `is_working`, `firmware_version`, and `hardware_version` 
 
 - Writing to `PUT /v1/sleep-configurations/temperature` has not been verified against the live API; climate `set_temperature` and the Number sliders use `PUT /v1/sleep-schedules` instead, which is confirmed.
 - Home Assistant's climate `async_turn_off` / `async_set_hvac_mode(OFF)` are no-ops for Bed Climate — the underlying system is schedule-driven. Use the **Power** switch to actually turn the device off.
-- HRV values are frequently `null` in real data; the HRV sensor will then report as `unknown`.
+- HRV values are frequently `null` in real data; the HRV Left / Right sensors will then report as `unknown`.
+- Per-side sleep score and HRV depend on the API returning a session for each occupied zone; a side with no recent session (e.g. an empty side of the bed) reports as `unknown`.
 - Starting and stopping sleep sessions is not supported by the API.
 - Zone splitting / merging and guest-user management are not exposed.
 

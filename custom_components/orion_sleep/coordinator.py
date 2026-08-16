@@ -19,6 +19,7 @@ from .const import (
     DEFAULT_INSIGHTS_DAYS,
     DEFAULT_SCAN_INTERVAL,
 )
+from .util import dedupe_devices_by_id
 from .websocket import OrionWebSocketManager, OrionWsState
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         hass: HomeAssistant,
         config_entry: OrionConfigEntry,
         api_client: OrionApiClient,
+        partner_api_client: OrionApiClient | None = None,
     ) -> None:
         interval = config_entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         super().__init__(
@@ -46,6 +48,10 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             update_interval=timedelta(seconds=interval),
         )
         self.api_client = api_client
+        self._partner_api_client = partner_api_client
+        # Snapshot of options at setup time; compared in _async_options_updated
+        # to avoid spurious reloads when entry.data changes (e.g. token refresh).
+        self.options: dict = dict(config_entry.options)
         self.devices: list[dict] = []
         # Live snapshots keyed by device id (UUID). Populated from
         # GET /v1/devices/{serial}/live on each poll AND from
@@ -78,7 +84,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         try:
             self.user = await self.api_client.get_current_user()
             self.user_id = self.user.get("id", "")
-            self.devices = await self.api_client.list_devices()
+            self.devices = dedupe_devices_by_id(await self.api_client.list_devices())
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
@@ -89,6 +95,11 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         try:
             await self.api_client.ensure_valid_token()
         except OrionAuthError as err:
+            _LOGGER.error(
+                "Orion authentication failed during token refresh — "
+                "re-authentication required: %s",
+                err,
+            )
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
             raise UpdateFailed(f"Error refreshing token: {err}") from err
@@ -96,11 +107,12 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         data: dict = {
             "schedules": {},
             "insights": {},
+            "partner_insights": {},
         }
 
         # Re-fetch devices each poll so zone/user changes surface.
         try:
-            self.devices = await self.api_client.list_devices()
+            self.devices = dedupe_devices_by_id(await self.api_client.list_devices())
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
@@ -156,15 +168,29 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         except (OrionApiError, OrionConnectionError) as err:
             _LOGGER.warning("Failed to fetch sleep schedules: %s", err)
 
+        insights_days = self.config_entry.options.get(
+            CONF_INSIGHTS_DAYS, DEFAULT_INSIGHTS_DAYS
+        )
         try:
-            insights_days = self.config_entry.options.get(
-                CONF_INSIGHTS_DAYS, DEFAULT_INSIGHTS_DAYS
-            )
             data["insights"] = await self.api_client.get_insights(days=insights_days)
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
             _LOGGER.warning("Failed to fetch insights: %s", err)
+
+        if self._partner_api_client is not None:
+            try:
+                await self._partner_api_client.ensure_valid_token()
+                data["partner_insights"] = await self._partner_api_client.get_insights(
+                    days=insights_days
+                )
+            except OrionAuthError as err:
+                _LOGGER.warning(
+                    "Orion partner account auth failed — re-authentication required: %s",
+                    err,
+                )
+            except (OrionApiError, OrionConnectionError) as err:
+                _LOGGER.warning("Failed to fetch partner insights: %s", err)
 
         return data
 
@@ -181,6 +207,55 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             sessions = day_data.get("sessions", [])
             if sessions:
                 return sessions[-1]
+        return None
+
+    def get_latest_session_for_zone(self, zone_id: str) -> dict | None:
+        """Get the most recent sleep session for a specific zone.
+
+        Checks the primary account's insights first, then the partner account's.
+        Primary and partner each cover their own zone, so in practice only one
+        source will have a match for any given zone_id.
+        """
+        for source_key in ("insights", "partner_insights"):
+            insights_data = (self.data or {}).get(source_key, {}).get("data", {})
+            if not insights_data:
+                continue
+            for date_key in sorted(insights_data.keys(), reverse=True):
+                day_data = insights_data[date_key]
+                for session in reversed(day_data.get("sessions", [])):
+                    if session.get("zone_id") == zone_id:
+                        # score lives at the day level, not the session level
+                        return {**session, "score": day_data.get("score")}
+        return None
+
+    def get_zone_live(self, device_id: str, zone_id: str) -> dict | None:
+        """Return the live setpoint dict for a specific zone, or None.
+
+        Reads from ``payload.zones[]`` (user intent: on/temp setpoints).
+        For the measured temperature and thermal state, use
+        ``get_zone_measured`` instead.
+        """
+        live = self.live_devices.get(device_id)
+        if not live:
+            return None
+        for zone in live.get("zones", []):
+            if zone.get("id") == zone_id:
+                return zone
+        return None
+
+    def get_zone_measured(self, device_id: str, zone_id: str) -> dict | None:
+        """Return the measured zone state dict for a specific zone, or None.
+
+        Reads from ``payload.status.zones[]`` (what the hardware actually
+        measures: temp in °C and thermal_state). Distinct from the setpoint
+        returned by ``get_zone_live``.
+        """
+        live = self.live_devices.get(device_id)
+        if not live:
+            return None
+        for zone in (live.get("status") or {}).get("zones", []):
+            if zone.get("id") == zone_id:
+                return zone
         return None
 
     def get_today_schedule(self) -> dict | None:
@@ -395,6 +470,14 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                     return False
             return True
         return None
+
+    def zone_thermal_state(self, device_id: str, zone_id: str) -> str | None:
+        """Return the thermal state string for a zone (e.g. 'standby'), or None."""
+        zone = self.get_zone_measured(device_id, zone_id)
+        if zone is None:
+            return None
+        state = zone.get("thermal_state")
+        return state if isinstance(state, str) else None
 
     def is_device_on(self, device_id: str) -> bool | None:
         """Check if the device is on.
