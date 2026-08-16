@@ -66,6 +66,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
         # Live WebSocket manager — one connection per device serial.
         self._ws_manager: OrionWebSocketManager = OrionWebSocketManager(
+            hass=hass,
             session=async_get_clientsession(hass),
             api_client=api_client,
             on_message=self._handle_ws_message,
