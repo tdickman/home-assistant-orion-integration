@@ -191,5 +191,37 @@
         "name": "Sensor 2 Status"
       }
     }
+  },
+  "services": {
+    "set_schedule": {
+      "name": "Set sleep schedule times",
+      "description": "Sets the recurring bedtime and/or wake-up time on the Orion sleep schedule.",
+      "fields": {
+        "bedtime": {
+          "name": "Bedtime",
+          "description": "Bedtime in 24-hour HH:MM format."
+        },
+        "wakeup": {
+          "name": "Wake-up time",
+          "description": "Wake-up time in 24-hour HH:MM format."
+        },
+        "days": {
+          "name": "Days",
+          "description": "Days of week to change (0 = Sunday night). Defaults to all seven."
+        },
+        "bedtime_is_active": {
+          "name": "Bedtime active",
+          "description": "Enable or disable the bedtime temperature change."
+        },
+        "wakeup_is_active": {
+          "name": "Wake-up active",
+          "description": "Enable or disable the wake-up temperature change."
+        },
+        "auto_turn_off": {
+          "name": "Auto turn off",
+          "description": "Turn the zone off 30 minutes after wake-up."
+        }
+      }
+    }
   }
 }

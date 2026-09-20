@@ -16,6 +16,7 @@ from .const import (
     CONF_REFRESH_TOKEN,
 )
 from .coordinator import OrionDataUpdateCoordinator
+from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +64,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Reload on options change
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
+    await async_setup_services(hass)
 
     return True
 

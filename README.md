@@ -12,6 +12,7 @@ Custom [Home Assistant](https://www.home-assistant.io/) integration for the **Or
 - **Climate control** — Target bed temperature per-zone, with the current measured temperature pulled from the latest session.
 - **Power and presence switches** — One-click power via the canonical `/v1/devices/{serial}/live` endpoint, plus an Away Mode switch that reads the authoritative presence signal from `zones[*].user`.
 - **Sleep insight sensors** — Sleep score, HRV, heart rate, breath rate, sleep-stage durations (awake / light / deep / REM), total time asleep, restless time, and body-movement rate for your most recent session.
+- **Set schedule times** — an `orion_sleep.set_schedule` service sets the recurring bedtime and wake-up times (all days, or specific ones), so schedules can be driven from automations.
 - **Schedule sensors and sliders** — Today's bedtime, wake-up time, duration, and target temperatures, plus Number sliders for adjusting the four schedule-phase temperature offsets (-10 … +10, app-style).
 - **Session tracking** — Binary sensor showing whether a sleep session is currently in progress.
 - **Diagnostic entity** — Live-connection state sensor (`connecting` / `connected` / `reconnecting` / `device_offline` / `auth_failed`), with the seconds-since-last-frame exposed as an attribute.

@@ -335,6 +335,16 @@ Notable:
 - Firmware-update-in-progress transitions
 - Water-fill-mode transitions
 
+## Services
+
+| Service | Endpoint | Notes |
+|---|---|---|
+| `orion_sleep.set_schedule` | `PUT /v1/sleep-schedules` | Sets recurring `bedtime` / `wakeup` **times** (and `bedtime_is_active`, `wakeup_is_active`, `auto_turn_off`) for the given `days`, defaulting to all seven. Partial update: only the supplied fields are sent. Registered in `services.py` from `async_setup_entry`; UI schema in `services.yaml`. |
+
+Day indices follow the API's numbering, **0 = Sunday**. Verified on a live
+account by writing to a single day and reading `today_sleep_schedule` back
+(day 2 on a Tuesday).
+
 ## Known Issues
 
 - **Duplicate entity**: `OrionCurrentTempOffsetSensor` is appended twice per device in `sensor.py:351-352` (same `unique_id`, HA will reject or warn about the second)

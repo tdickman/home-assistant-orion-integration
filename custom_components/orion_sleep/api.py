@@ -403,7 +403,7 @@ class OrionApiClient:
         field is changed, other fields are preserved).
 
         Args:
-            day: Day of week (0=Monday ... 6=Sunday).
+            day: Day of week (0=Sunday ... 6=Saturday).
             field: One of bedtime_temp, phase_1_temp, phase_2_temp, wakeup_temp.
             celsius: Absolute Celsius value.
         """
