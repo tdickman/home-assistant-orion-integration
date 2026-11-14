@@ -102,7 +102,7 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
         phone = self._auth_value if self._auth_method == AUTH_METHOD_PHONE else None
         success = await client.request_auth_code(email=email, phone=phone)
         if not success:
-            raise OrionConnectionError("API returned success=false")
+            raise OrionApiError("API returned success=false")
         return None
 
     async def async_step_email(
@@ -116,10 +116,14 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                 result = await self._async_send_code(user_input["email"])
                 if result is None:
                     return await self.async_step_verify()
-            except OrionConnectionError:
+            except OrionConnectionError as err:
+                _LOGGER.warning("Requesting Orion verification code failed: %s", err)
                 errors["base"] = "cannot_connect"
-            except OrionApiError:
-                errors["base"] = "unknown"
+            except OrionApiError as err:
+                # Orion rejects logins that don't match how the account was
+                # created; point the user at the other method.
+                _LOGGER.warning("Requesting Orion verification code failed: %s", err)
+                errors["base"] = "email_rejected"
 
         return self.async_show_form(
             step_id="email",
@@ -154,10 +158,12 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                     result = await self._async_send_code(phone)
                     if result is None:
                         return await self.async_step_verify()
-                except OrionConnectionError:
+                except OrionConnectionError as err:
+                    _LOGGER.warning("Requesting Orion verification code failed: %s", err)
                     errors["base"] = "cannot_connect"
-                except OrionApiError:
-                    errors["base"] = "unknown"
+                except OrionApiError as err:
+                    _LOGGER.warning("Requesting Orion verification code failed: %s", err)
+                    errors["base"] = "phone_rejected"
 
         return self.async_show_form(
             step_id="phone",

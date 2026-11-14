@@ -39,6 +39,8 @@
       "invalid_code": "Invalid verification code",
       "invalid_auth": "Authentication failed",
       "invalid_phone": "Phone number must include the leading 1 country code and be 11 digits total (e.g. 15551234567).",
+      "email_rejected": "Orion Sleep couldn't send a code to this email. If your Orion account uses a phone number, start setup again and choose Phone.",
+      "phone_rejected": "Orion Sleep couldn't send a code to this phone number. If your Orion account uses an email address, start setup again and choose Email.",
       "unknown": "An unexpected error occurred"
     },
     "abort": {
