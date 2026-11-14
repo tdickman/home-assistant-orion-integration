@@ -17,6 +17,11 @@ _LOGGER = logging.getLogger(__name__)
 class OrionApiError(Exception):
     """General API error."""
 
+    def __init__(self, message: str, status: int | None = None) -> None:
+        """Store the HTTP status, when the error came from a response."""
+        super().__init__(message)
+        self.status = status
+
 
 class OrionAuthError(OrionApiError):
     """Authentication failure (401 / invalid tokens)."""
@@ -82,7 +87,8 @@ class OrionApiClient:
                 if not resp.ok:
                     body = await resp.text()
                     raise OrionApiError(
-                        f"API error on {method} {path}: {resp.status} {resp.reason} - {body}"
+                        f"API error on {method} {path}: {resp.status} {resp.reason} - {body}",
+                        status=resp.status,
                     )
                 if resp.content_length == 0:
                     return {}

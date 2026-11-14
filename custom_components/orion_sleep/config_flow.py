@@ -102,8 +102,22 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
         phone = self._auth_value if self._auth_method == AUTH_METHOD_PHONE else None
         success = await client.request_auth_code(email=email, phone=phone)
         if not success:
-            raise OrionConnectionError("API returned success=false")
+            raise OrionApiError("API returned success=false")
         return None
+
+    def _send_code_error(self, err: OrionApiError) -> str:
+        """Map a failed code request to a form error key."""
+        _LOGGER.warning("Requesting Orion verification code failed: %s", err)
+        if isinstance(err, OrionConnectionError):
+            return "cannot_connect"
+        if isinstance(err, OrionAuthError) or err.status == 429:
+            return "unknown"
+        # Orion rejects a login that doesn't match how the account was created
+        # (e.g. email for a phone account) with a 4xx or success=false; point
+        # the user at the other method. Server errors stay "unknown".
+        if err.status is None or 400 <= err.status < 500:
+            return f"{self._auth_method}_rejected"
+        return "unknown"
 
     async def async_step_email(
         self, user_input: dict[str, Any] | None = None
@@ -116,10 +130,8 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                 result = await self._async_send_code(user_input["email"])
                 if result is None:
                     return await self.async_step_verify()
-            except OrionConnectionError:
-                errors["base"] = "cannot_connect"
-            except OrionApiError:
-                errors["base"] = "unknown"
+            except OrionApiError as err:
+                errors["base"] = self._send_code_error(err)
 
         return self.async_show_form(
             step_id="email",
@@ -154,10 +166,8 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                     result = await self._async_send_code(phone)
                     if result is None:
                         return await self.async_step_verify()
-                except OrionConnectionError:
-                    errors["base"] = "cannot_connect"
-                except OrionApiError:
-                    errors["base"] = "unknown"
+                except OrionApiError as err:
+                    errors["base"] = self._send_code_error(err)
 
         return self.async_show_form(
             step_id="phone",
